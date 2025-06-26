@@ -24,7 +24,7 @@ def test(model):
         transforms.Normalize(model.default_cfg["mean"], model.default_cfg["std"]),
     ])
 
-    img = Image.open("/home/jinxin/桌面/OpenToMe/demo/n02510455_205.jpeg")
+    img = Image.open("/demo/n02510455_205.jpeg")
     img = transform(img)[None, ...]
     model.eval()
     outputs = model(img)
@@ -81,20 +81,18 @@ def main():
         raise ValueError(f"Model '{args.model_name}' could not be created.")
     logger.info(f"Model {args.model_name} loaded successfully.")
 
-    # build the dataloader  -->  /yuchang/lsy/.cache/imagenet/
-    # if not osp.exists(args.dataset):
-    #     logger.info(f"Error: Dataset path '{args.dataset}' does not exist.")
-    #     raise FileNotFoundError(f"Dataset path '{args.dataset}' does not exist.")
-    # val_loader = dataset_loader.create_dataset(
-    #     dataset_path=args.dataset,
-    #     batch_size=args.batch_size,
-    #     num_workers=args.num_workers,
-    #     input_size = model.default_cfg["input_size"][1],
-    #     mean=model.default_cfg["mean"],
-    #     std=model.default_cfg["std"]
-    # )
-
-    val_loader = None
+    # build the dataloader  -->  /path/imagenet/
+    if not osp.exists(args.dataset):
+        logger.info(f"Error: Dataset path '{args.dataset}' does not exist.")
+        raise FileNotFoundError(f"Dataset path '{args.dataset}' does not exist.")
+    val_loader = dataset_loader.create_dataset(
+        dataset_path=args.dataset,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        input_size = model.default_cfg["input_size"][1],
+        mean=model.default_cfg["mean"],
+        std=model.default_cfg["std"]
+    )
 
     assert args.merge_num >= 0, "Please specify a positive merge number."
     if args.tome in ['tome', 'tofu']:
@@ -110,7 +108,7 @@ def main():
         elif args.merge_ratio is None and args.merge_num is not None:
             merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
                                     (model.default_cfg["input_size"][1]/args.patch_size) ** 2, inflect)
-        # update r
+        # update _ome_info
         model.r = (merge_ratio, inflect)
         model._tome_info["r"] = model.r
         model._tome_info["total_merge"] = args.merge_num
@@ -125,7 +123,7 @@ def main():
         elif args.merge_ratio is None and args.merge_num is not None:
             merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
                                     (model.default_cfg["input_size"][1]/args.patch_size) ** 2, inflect)
-        # update r
+        # update _ome_info
         model.r = (merge_ratio, inflect)
         model._tome_info["r"] = model.r
         model._tome_info["k2"] = 3
@@ -150,7 +148,7 @@ def main():
         elif args.merge_ratio is None and args.merge_num is not None:
             merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
                                     (model.default_cfg["input_size"][1]/args.patch_size) ** 2, inflect)
-        # update r
+        # update _ome_info
         model.r = (merge_ratio, inflect)
         model._tome_info["r"] = model.r
         model._tome_info["total_merge"] = args.merge_num
@@ -165,6 +163,7 @@ def main():
         pass
     else:
         raise ValueError("Invalid ToMe implementation specified. Use 'tome' or 'none'.")
+    # For debugging...
     test(model)
 
     # evaluate the model
