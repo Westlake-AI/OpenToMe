@@ -18,7 +18,7 @@ from timm.models.vision_transformer import VisionTransformer, LayerScale
 from timm.models.vision_transformer import Attention as TimmAttention
 from timm.models.vision_transformer import Block as TimmBlock
 
-from opentome.tome.tome import bipartite_soft_matching, merge_source, merge_wavg, parse_r
+from opentome.tome.tome import mctf_bipartite_soft_matching, merge_source, mctf_merge_wavg, parse_r
 from opentome.timm import Attention, Block
 
 try:
@@ -28,7 +28,7 @@ except ImportError:
     FLASH_ATTN_AVAILABLE = False
 
 
-class ToMeAttention(Attention):
+class MCTFAttention(Attention):
     """
     Modifications:
      - Apply proportional attention
@@ -36,41 +36,47 @@ class ToMeAttention(Attention):
     """
 
     def forward(
-        self, x: torch.Tensor, size: torch.Tensor = None
+        self, x: torch.Tensor, size: torch.Tensor = None, return_attn: bool = False
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Note: this is copied from timm.models.vision_transformer.Attention with modifications.
         B, N, C = x.shape
-        qkv = (self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads
-                                   ).permute(2, 0, 3, 1, 4))
+        qkv = (
+            self.qkv(x)
+            .reshape(B, N, 3, self.num_heads, C // self.num_heads)
+            .permute(2, 0, 3, 1, 4)
+        )
         q, k, v = (
-            qkv[0], qkv[1], qkv[2],
+            qkv[0],
+            qkv[1],
+            qkv[2],
         )  # make torchscript happy (cannot use tensor as tuple)
 
-        if self.fused_attn:  # pytorch flash-attn with ToMe
-            x = F.scaled_dot_product_attention(q, k, v,
-                attn_mask=None if size is None else size.log()[:, None, None, :, 0],
-                dropout_p=self.attn_drop.p if self.training else 0.,
-            )
-        else:  # naive attn with ToMe
-            attn = (q @ k.transpose(-2, -1)) * self.scale
-            if size is not None:  # Apply proportional attention
-                attn = attn + size.log()[:, None, None, :, 0]
-            attn = attn.softmax(dim=-1)
-            attn = self.attn_drop(attn)
-            x = attn @ v
+        attn = (q @ k.transpose(-2, -1)) * self.scale
 
-        x = x.transpose(1, 2).reshape(B, N, C)
+        # Apply proportional attention
+        if size is not None:
+            attn = attn + size.log()[:, None, None, :, 0]
+
+        attn = attn.softmax(dim=-1)
+        attn_ = attn.clone()
+
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
 
-        # Return k as the metric
-        return x, k.mean(1)
+        # Return k as well here
+        if return_attn:
+            return x, attn_
+        else:
+            return x, k.mean(dim=1)
 
 
-class ToMeBlock(Block):
+class MCTFBlock(Block):
     """
     Modifications:
-     - Apply ToMe between the attention and mlp blocks
+     - Apply MCTF between the attention and mlp blocks
      - Compute and propogate token size and potentially the token sources.
     """
 
@@ -81,33 +87,41 @@ class ToMeBlock(Block):
         return self.drop_path2(x) if hasattr(self, "drop_path2") else self.drop_path(x)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Note: this is copied from timm.models.vision_transformer.Block with modifications.
+
+        x_ = x.clone()
         attn_size = self._tome_info["size"] if self._tome_info["prop_attn"] else None
-        x_attn, metric = self.attn(self.norm1(x), attn_size)
-        x = x + self._drop_path1(self.ls1(x_attn))
+        x_attn, metric = self.attn(self.norm1(x), attn_size, return_attn=True)   # In MCTF, we return the attention metric, not k.mean(dim=1)
+        x = x + self._drop_path1(x_attn)
 
         r = self._tome_info["r"].pop(0)
         if r > 0:
             # Apply ToMe here
-            merge, _ = bipartite_soft_matching(
-                metric,
-                r,
-                self._tome_info["class_token"],
-                self._tome_info["distill_token"],
+            merge, _ = mctf_bipartite_soft_matching(
+                metric = x_,
+                r = r,
+                attn = metric,
+                class_token = self._tome_info["class_token"],
+                distill_token = self._tome_info["distill_token"],
+                tau_sim = self._tome_info["tau_sim"],
+                tau_info = self._tome_info["tau_info"],
+                tau_size = self._tome_info["tau_size"],
+                size = self._tome_info["size"],
+                bidirection = self._tome_info["bidirection"]
             )
             if self._tome_info["trace_source"]:
                 self._tome_info["source"] = merge_source(
                     merge, x, self._tome_info["source"]
                 )
-            x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
-        # print(r, x.shape)
-
-        x = x + self._drop_path2(self.ls2(self.mlp(self.norm2(x))))
+            x, self._tome_info["size"], _ = mctf_merge_wavg(merge, x, metric, size=self._tome_info["size"],
+                                                            one_step_ahead=self._tome_info["one_step_ahead"],
+                                                            pooling_type=self._tome_info["pooling_type"],)
+        print(r, x.shape)
+        x = x + self._drop_path2(self.mlp(self.norm2(x)))
         return x
 
 
 def make_tome_class(transformer_class):
-    class ToMeVisionTransformer(transformer_class):
+    class MCTFVisionTransformer(transformer_class):
         """
         Modifications:
         - Initialize r, token size, and token sources.
@@ -121,30 +135,26 @@ def make_tome_class(transformer_class):
 
             return super().forward(*args, **kwdargs)
 
-    return ToMeVisionTransformer
+    return MCTFVisionTransformer
 
 
 
-"""
-Token Merging: Your ViT but Faster, ICLR'2023
-    - paper (https://arxiv.org/abs/2210.09461)
-    - code(https://github.com/facebookresearch/ToMe)
-"""
-def tome_apply_patch(
+def mctf_apply_patch(
     model: VisionTransformer, trace_source: bool = True, prop_attn: bool = True
 ):
+    """ Apply MCTF patch to a VisionTransformer model. 
+        This modifies the model's class to MCTFVisionTransformer and updates the blocks and attention layers to MCTFBlock 
+        and MCTFAttention respectively.
+        Args:
+            model (VisionTransformer): The model to apply the patch to.
+            trace_source (bool): Whether to trace the source of tokens during merging. Defaults to True.
+            prop_attn (bool): Whether to propagate attention information. Defaults to True.
+        Returns:
+            None: The model is modified in place.
     """
-    Applies ToMe to this transformer. Afterward, set r using model.r.
+    MCTFVisionTransformer = make_tome_class(model.__class__)
 
-    If you want to know the source of each token (e.g., for visualization), set trace_source = true.
-    The sources will be available at model._tome_info["source"] afterward.
-
-    For proportional attention, set prop_attn to True. This is only necessary when evaluating models off
-    the shelf. For trianing and for evaluating MAE models off the self set this to be False.
-    """
-    ToMeVisionTransformer = make_tome_class(model.__class__)
-
-    model.__class__ = ToMeVisionTransformer
+    model.__class__ = MCTFVisionTransformer
     model.r = 0
     # model.cls_token = getattr(model, 'cls_token', None)
     model._tome_info = {
@@ -154,8 +164,14 @@ def tome_apply_patch(
         "total_merge": None,
         "trace_source": trace_source,
         "prop_attn": prop_attn,
-        "class_token": model.cls_token is not None,
-        "distill_token": False,
+        "class_token": getattr(model, 'cls_token', None) is not None,
+        "distill_token": getattr(model, 'dist_token', None) is not None,
+        "one_step_ahead": 1,
+        "tau_sim": 1,
+        "tau_info": 0,
+        "tau_size": 0,
+        "bidirection": True,
+        "pooling_type": 'none', # ['none', 'max', 'mean]
     }
 
     if hasattr(model, "dist_token") and model.dist_token is not None:
@@ -163,7 +179,7 @@ def tome_apply_patch(
 
     for module in model.modules():
         if isinstance(module, (Block, TimmBlock)):
-            module.__class__ = ToMeBlock
+            module.__class__ = MCTFBlock
             module._tome_info = model._tome_info
         elif isinstance(module, (Attention, TimmAttention)):
-            module.__class__ = ToMeAttention
+            module.__class__ = MCTFAttention
