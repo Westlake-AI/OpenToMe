@@ -14,7 +14,8 @@ from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
 from PIL import Image
 
-def test(model):
+
+def demo_eval(model):
     input_size = model.default_cfg["input_size"][1]
 
     transform = transforms.Compose([
@@ -24,22 +25,24 @@ def test(model):
         transforms.Normalize(model.default_cfg["mean"], model.default_cfg["std"]),
     ])
 
-    img = Image.open("/demo/n02510455_205.jpeg")
+    img = Image.open("./demo/n02510455_205.jpeg")
     img = transform(img)[None, ...]
     model.eval()
     outputs = model(img)
     print(outputs.topk(5).indices[0].tolist())
 
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description='OpenToMe test (and eval) a model')
-    parser.add_argument('--model_name', type=str, default='vit_large_patch16_384', help='evaluation model name')
+    parser.add_argument('--model_name', type=str, default='vit_base_patch16_224', help='evaluation model name')
     parser.add_argument('--patch_size', type=int, default=16, help='model patch size')
     parser.add_argument('--tome', type=str, default='none', help='ToMe implementation to use, options: [tome, none]')
     parser.add_argument('--merge_num', type=int, default=98, help='the number of merge tokens')
+    parser.add_argument('--input_size', type=int, default=None, help='the input resolution')
     parser.add_argument('--merge_ratio', type=float, default=None, help='the ratio of merge tokens in per layers')
-    parser.add_argument('--dataset', type=str, default='data/ImageNet', help='the dataset to use for evaluation')
-    parser.add_argument('--batch_size', type=int, default=128, help='batch size for evaluation')
+    parser.add_argument('--dataset', type=str, default='data/ImageNet/val', help='the dataset to use for evaluation')
+    parser.add_argument('--batch_size', type=int, default=100, help='batch size for evaluation')
     parser.add_argument('--num_workers', type=int, default=4, help='number of workers for data loading')
     parser.add_argument('--work_dir', type=str, default='work_dirs/in1k_classification', help='the dir to save logs and models')
     parser.add_argument('--gpu-id', type=int, default=0, help='id of gpu to use ' '(only applicable to non-distributed testing)')
@@ -89,7 +92,7 @@ def main():
         dataset_path=args.dataset,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        input_size = model.default_cfg["input_size"][1],
+        input_size=model.default_cfg["input_size"][1] if args.input_size is None else args.input_size,
         mean=model.default_cfg["mean"],
         std=model.default_cfg["std"]
     )
@@ -163,8 +166,9 @@ def main():
         pass
     else:
         raise ValueError("Invalid ToMe implementation specified. Use 'tome' or 'none'.")
+
     # For debugging...
-    test(model)
+    demo_eval(model)
 
     # evaluate the model
     total_top1, total_top5 = 0, 0
@@ -182,6 +186,7 @@ def main():
             total_top5 += results[-1].item() * args.batch_size
             total_samples += args.batch_size
         logger.info(f"Final accuracy: Top-1: {total_top1 / total_samples:.2f}%, Top-5: {total_top5 / total_samples:.2f}%")
+
 
 if __name__=="__main__":
 

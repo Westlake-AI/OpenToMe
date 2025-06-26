@@ -21,6 +21,8 @@ pip install -r requirements.txt
 
 ## Getting Started
 
+### Model Examples
+
 Here is an example of using ToMe with timm Attention blocks.
 
 ```python
@@ -91,7 +93,18 @@ z = model.forward(x)
 print(x.shape, z.shape)
 ```
 
-### Token Compression
+### ImageNet Image Classification
+
+Here is an example of evaluate ImageNet validation set with various Token Compression methods.
+```bash
+export HF_ENDPOINT=https://hf-mirror.com
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node=4 \
+./evaluations/image_classification/in1k_example.py --merge_num 100 --dataset ./data/ImageNet/val
+```
+
+## Token Compression Baselines
+
 - [x] **ToMe [ICLR 2023]** Token Merging: Your ViT but Faster [paper](https://arxiv.org/abs/2210.09461) [code](https://github.com/facebookresearch/ToMe)
 - [x] **DiffRate [ICCV2023]** Diffrate: Differentiable Compression Rate for Efficient Vision Transformers [paper](https://arxiv.org/abs/2305.17997) [code](https://github.com/OpenGVLab/DiffRate)
 - [x] **DTEM [NIPS2024]** Learning to Merge Tokens via Decoupled Embedding for Efficient Vision Transformers [paper](https://openreview.net/forum?id=pVPyCgXv57) [code](https://github.com/movinghoon/DTEM)
