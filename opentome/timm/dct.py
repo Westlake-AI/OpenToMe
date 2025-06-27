@@ -52,8 +52,8 @@ class DCTBlock(Block):
                             r, 
                             class_token=self._tome_info["class_token"]
                         )
-        # print(x.shape)
-        
+        # print(r, x.shape)
+
         return x
 
 
