@@ -138,7 +138,11 @@ def make_tome_class(transformer_class):
     return MCTFVisionTransformer
 
 
-
+"""
+Multi-criteria Token Fusion with One-step-ahead Attention for Efficient Vision Transformers, CVPR'2024
+    - paper (https://arxiv.org/abs/2403.10030)
+    - code (https://github.com/mlvlab/MCTF)
+"""
 def mctf_apply_patch(
     model: VisionTransformer, trace_source: bool = True, prop_attn: bool = True
 ):

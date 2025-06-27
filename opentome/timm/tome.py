@@ -128,7 +128,7 @@ def make_tome_class(transformer_class):
 """
 Token Merging: Your ViT but Faster, ICLR'2023
     - paper (https://arxiv.org/abs/2210.09461)
-    - code(https://github.com/facebookresearch/ToMe)
+    - code (https://github.com/facebookresearch/ToMe)
 """
 def tome_apply_patch(
     model: VisionTransformer, trace_source: bool = True, prop_attn: bool = True
@@ -154,8 +154,8 @@ def tome_apply_patch(
         "total_merge": None,
         "trace_source": trace_source,
         "prop_attn": prop_attn,
-        "class_token": model.cls_token is not None,
-        "distill_token": False,
+        "class_token": getattr(model, 'cls_token', None) is not None,
+        "distill_token": getattr(model, 'dist_token', None) is not None,
     }
 
     if hasattr(model, "dist_token") and model.dist_token is not None:

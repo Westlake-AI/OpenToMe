@@ -302,8 +302,8 @@ def make_tome_class(transformer_class):
 
 """"
 Learning to Merge Tokens via Decoupled Embedding for Efficient Vision Transformers, NIPS'2024
-    - paper(https://openreview.net/forum?id=pVPyCgXv57) 
-    - code(https://github.com/movinghoon/DTEM)
+    - paper (https://openreview.net/forum?id=pVPyCgXv57) 
+    - code (https://github.com/movinghoon/DTEM)
 """
 def dtem_apply_patch(
     model: VisionTransformer, feat_dim=None, trace_source=True, prop_attn=True

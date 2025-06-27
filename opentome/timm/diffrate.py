@@ -288,7 +288,11 @@ def make_tome_class(transformer_class):
     return DiffRateVisionTransformer
 
 
-
+""""
+Diffrate: Differentiable Compression Rate for Efficient Vision Transformers, ICCV'2023
+    - paper (https://arxiv.org/abs/2305.17997)
+    - code (https://github.com/OpenGVLab/DiffRate)
+"""
 def diffrate_apply_patch(
     model: VisionTransformer, trace_source: bool = False, prune_granularity=1, merge_granularity=1
 ):

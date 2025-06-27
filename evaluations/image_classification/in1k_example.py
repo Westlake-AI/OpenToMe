@@ -1,7 +1,7 @@
 import timm
 import torch
 from tqdm import tqdm
-from opentome.timm import tome, dtem, diffrate, tofu, mctf
+from opentome.timm import tome, dtem, diffrate, tofu, mctf, crossget, dct
 from opentome.tome import tome as tm
 from opentome.utils.datasets import dataset_loader, accuracy
 import argparse
@@ -85,26 +85,31 @@ def main():
     logger.info(f"Model {args.model_name} loaded successfully.")
 
     # build the dataloader  -->  /path/imagenet/
-    if not osp.exists(args.dataset):
-        logger.info(f"Error: Dataset path '{args.dataset}' does not exist.")
-        raise FileNotFoundError(f"Dataset path '{args.dataset}' does not exist.")
-    val_loader = dataset_loader.create_dataset(
-        dataset_path=args.dataset,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        input_size=model.default_cfg["input_size"][1] if args.input_size is None else args.input_size,
-        mean=model.default_cfg["mean"],
-        std=model.default_cfg["std"]
-    )
+    # if not osp.exists(args.dataset):
+    #     logger.info(f"Error: Dataset path '{args.dataset}' does not exist.")
+    #     raise FileNotFoundError(f"Dataset path '{args.dataset}' does not exist.")
+    # val_loader = dataset_loader.create_dataset(
+    #     dataset_path=args.dataset,
+    #     batch_size=args.batch_size,
+    #     num_workers=args.num_workers,
+    #     input_size=model.default_cfg["input_size"][1] if args.input_size is None else args.input_size,
+    #     mean=model.default_cfg["mean"],
+    #     std=model.default_cfg["std"]
+    # )
+    val_loader = None
 
     assert args.merge_num >= 0, "Please specify a positive merge number."
-    if args.tome in ['tome', 'tofu']:
+    if args.tome in ['tome', 'tofu', 'crossget', 'dct']:
         if args.tome == 'tome':
             tome.tome_apply_patch(model, trace_source=True)
         elif args.tome == 'tofu':
             tofu.tofu_apply_patch(model, trace_source=True)
+        elif args.tome == 'crossget':
+            crossget.crossget_apply_patch(model, trace_source=True)
+        elif args.tome == 'dct':
+            dct.dct_apply_patch(model, trace_source=True)
         if not hasattr(model, '_tome_info'):
-            raise ValueError("The model does not support ToMe. Please use a model that supports ToMe.")
+            raise ValueError("The model does not support ToMe/ToFu/CrossGET. Please use a model that supports ToMe.")
         inflect = -0.5
         if args.merge_ratio is not None and args.merge_num is None:
             args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, inflect)))
