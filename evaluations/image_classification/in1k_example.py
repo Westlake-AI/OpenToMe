@@ -89,18 +89,18 @@ def main():
     logger.info(f"Model {args.model_name} loaded successfully.")
 
     # build the dataloader  -->  /path/imagenet/
-    # if not osp.exists(args.dataset):
-    #     logger.info(f"Error: Dataset path '{args.dataset}' does not exist.")
-    #     raise FileNotFoundError(f"Dataset path '{args.dataset}' does not exist.")
-    # val_loader = dataset_loader.create_dataset(
-    #     dataset_path=args.dataset,
-    #     batch_size=args.batch_size,
-    #     num_workers=args.num_workers,
-    #     input_size=model.default_cfg["input_size"][1] if args.input_size is None else args.input_size,
-    #     mean=model.default_cfg["mean"],
-    #     std=model.default_cfg["std"]
-    # )
-    val_loader = None
+    if not osp.exists(args.dataset):
+        logger.info(f"Error: Dataset path '{args.dataset}' does not exist.")
+        raise FileNotFoundError(f"Dataset path '{args.dataset}' does not exist.")
+    val_loader = dataset_loader.create_dataset(
+        dataset_path=args.dataset,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        input_size=model.default_cfg["input_size"][1] if args.input_size is None else args.input_size,
+        mean=model.default_cfg["mean"],
+        std=model.default_cfg["std"]
+    )
+    # val_loader = None
 
     assert args.merge_num >= 0, "Please specify a positive merge number."
     assert args.inflect in [-0.5, 1, 2], "Please specify a valid inflect value."
@@ -175,7 +175,7 @@ def main():
         raise ValueError("Invalid ToMe implementation specified. Use 'tome' or 'none'.")
 
     # For debugging...
-    demo_eval(model)
+    # demo_eval(model)
 
     # evaluate the model
     total_top1, total_top5 = 0, 0
