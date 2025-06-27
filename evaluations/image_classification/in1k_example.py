@@ -35,15 +35,19 @@ def demo_eval(model):
 def parse_args():
     parser = argparse.ArgumentParser(
         description='OpenToMe test (and eval) a model')
+    # Baiscal parameters
     parser.add_argument('--model_name', type=str, default='vit_base_patch16_224', help='evaluation model name')
     parser.add_argument('--patch_size', type=int, default=16, help='model patch size')
     parser.add_argument('--tome', type=str, default='none', help='ToMe implementation to use, options: [tome, none]')
     parser.add_argument('--merge_num', type=int, default=98, help='the number of merge tokens')
-    parser.add_argument('--input_size', type=int, default=None, help='the input resolution')
     parser.add_argument('--merge_ratio', type=float, default=None, help='the ratio of merge tokens in per layers')
+    parser.add_argument('--inflect', type=float, default=-0.5, help='the inflect of merge ratio, default: -0.5')
+    # Dataset parameters
+    parser.add_argument('--input_size', type=int, default=None, help='the input resolution')
     parser.add_argument('--dataset', type=str, default='data/ImageNet/val', help='the dataset to use for evaluation')
     parser.add_argument('--batch_size', type=int, default=100, help='batch size for evaluation')
     parser.add_argument('--num_workers', type=int, default=4, help='number of workers for data loading')
+    # Environment parameters
     parser.add_argument('--work_dir', type=str, default='work_dirs/in1k_classification', help='the dir to save logs and models')
     parser.add_argument('--gpu-id', type=int, default=0, help='id of gpu to use ' '(only applicable to non-distributed testing)')
     parser.add_argument('--launcher', choices=['none', 'slurm', 'pytorch'], default='none', help='job launcher')
@@ -99,6 +103,7 @@ def main():
     # val_loader = None
 
     assert args.merge_num >= 0, "Please specify a positive merge number."
+    assert args.inflect in [-0.5, 1, 2], "Please specify a valid inflect value."
     if args.tome in ['tome', 'tofu', 'crossget', 'dct']:
         if args.tome == 'tome':
             tome.tome_apply_patch(model, trace_source=True)
@@ -110,14 +115,13 @@ def main():
             dct.dct_apply_patch(model, trace_source=True)
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support ToMe/ToFu/CrossGET. Please use a model that supports ToMe.")
-        inflect = -0.5
         if args.merge_ratio is not None and args.merge_num is None:
-            args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, inflect)))
+            args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, args.inflect)))
         elif args.merge_ratio is None and args.merge_num is not None:
             merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
-                                    (model.default_cfg["input_size"][1]/args.patch_size) ** 2, inflect)
+                                    (model.default_cfg["input_size"][1]/args.patch_size) ** 2, args.inflect)
         # update _ome_info
-        model.r = (merge_ratio, inflect)
+        model.r = (merge_ratio, args.inflect)
         model._tome_info["r"] = model.r
         model._tome_info["total_merge"] = args.merge_num
         logger.info(model._tome_info)
@@ -125,14 +129,13 @@ def main():
         dtem.dtem_apply_patch(model, feat_dim=None)  # exteranal feature dim, defalut: none
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support DTEM. Please use a model that supports DTEM.")
-        inflect = -0.5
         if args.merge_ratio is not None and args.merge_num is None:
-            args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, inflect)))
+            args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, args.inflect)))
         elif args.merge_ratio is None and args.merge_num is not None:
             merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
-                                    (model.default_cfg["input_size"][1]/args.patch_size) ** 2, inflect)
+                                    (model.default_cfg["input_size"][1]/args.patch_size) ** 2, args.inflect)
         # update _ome_info
-        model.r = (merge_ratio, inflect)
+        model.r = (merge_ratio, args.inflect)
         model._tome_info["r"] = model.r
         model._tome_info["k2"] = 3
         model._tome_info["tau1"] = 0.1
@@ -150,14 +153,13 @@ def main():
         mctf.mctf_apply_patch(model)
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support MCTF. Please use a model that supports MCTF.")
-        inflect = -0.5
         if args.merge_ratio is not None and args.merge_num is None:
-            args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, inflect)))
+            args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, args.inflect)))
         elif args.merge_ratio is None and args.merge_num is not None:
             merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
-                                    (model.default_cfg["input_size"][1]/args.patch_size) ** 2, inflect)
+                                    (model.default_cfg["input_size"][1]/args.patch_size) ** 2, args.inflect)
         # update _ome_info
-        model.r = (merge_ratio, inflect)
+        model.r = (merge_ratio, args.inflect)
         model._tome_info["r"] = model.r
         model._tome_info["total_merge"] = args.merge_num
         model._tome_info["one_step_ahead"] = 1
