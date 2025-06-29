@@ -26,6 +26,61 @@ from ..tome.diffrate import DiffRate as df
 from ..tome.diffrate import get_merge_func, ste_min
 
 
+class DiffRateAttention(Attention):
+    """
+    Modifications:
+     - Apply proportional attention
+     - Return the mean of k over heads from attention
+    """
+
+    def softmax_with_policy(self, attn, policy, eps=1e-6):
+        B, N = policy.size()
+        B, H, N, N = attn.size()
+        attn_policy = policy.reshape(B, 1, 1, N)  # * policy.reshape(B, 1, N, 1)
+        eye = torch.eye(N, dtype=attn_policy.dtype, device=attn_policy.device).view(1, 1, N, N)
+        attn_policy = attn_policy + (1.0 - attn_policy) * eye
+        max_att = torch.max(attn, dim=-1, keepdim=True)[0]
+        attn = attn - max_att
+        # for stable training
+        attn = attn.to(torch.float32).exp_() * attn_policy.to(torch.float32)
+        attn = (attn + eps/N) / (attn.sum(dim=-1, keepdim=True) + eps)
+        return attn.type_as(max_att)
+
+    def forward(
+        self, x: torch.Tensor, size: torch.Tensor = None, mask: torch.Tensor = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Note: this is copied from timm.models.vision_transformer.Attention with modifications.
+        B, N, C = x.shape
+        qkv = (
+            self.qkv(x)
+            .reshape(B, N, 3, self.num_heads, C // self.num_heads)
+            .permute(2, 0, 3, 1, 4)
+        )
+        q, k, v = (
+            qkv[0],
+            qkv[1],
+            qkv[2],
+        )  # make torchscript happy (cannot use tensor as tuple)
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+
+        # Apply proportional attention
+        if size is not None:
+            attn = attn + size.log()[:, None, None, :, 0]
+        
+        if self.training:
+            attn = self.softmax_with_policy(attn, mask)
+        else:
+            attn = attn.softmax(dim=-1)
+            
+        attn = self.attn_drop(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        # Return attention map as well here
+        return x, attn
+
+
 class DiffRateBlock(Block):
     """
     Modifications:
@@ -117,62 +172,6 @@ class DiffRateBlock(Block):
 
             x = x + self._drop_path2(self.mlp(self.norm2(x)))
         return x
-                
-
-class DiffRateAttention(Attention):
-    """
-    Modifications:
-     - Apply proportional attention
-     - Return the mean of k over heads from attention
-    """
-
-    def softmax_with_policy(self, attn, policy, eps=1e-6):
-        B, N = policy.size()
-        B, H, N, N = attn.size()
-        attn_policy = policy.reshape(B, 1, 1, N)  # * policy.reshape(B, 1, N, 1)
-        eye = torch.eye(N, dtype=attn_policy.dtype, device=attn_policy.device).view(1, 1, N, N)
-        attn_policy = attn_policy + (1.0 - attn_policy) * eye
-        max_att = torch.max(attn, dim=-1, keepdim=True)[0]
-        attn = attn - max_att
-        # for stable training
-        attn = attn.to(torch.float32).exp_() * attn_policy.to(torch.float32)
-        attn = (attn + eps/N) / (attn.sum(dim=-1, keepdim=True) + eps)
-        return attn.type_as(max_att)
-
-    def forward(
-        self, x: torch.Tensor, size: torch.Tensor = None, mask: torch.Tensor = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Note: this is copied from timm.models.vision_transformer.Attention with modifications.
-        B, N, C = x.shape
-        qkv = (
-            self.qkv(x)
-            .reshape(B, N, 3, self.num_heads, C // self.num_heads)
-            .permute(2, 0, 3, 1, 4)
-        )
-        q, k, v = (
-            qkv[0],
-            qkv[1],
-            qkv[2],
-        )  # make torchscript happy (cannot use tensor as tuple)
-
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-
-        # Apply proportional attention
-        if size is not None:
-            attn = attn + size.log()[:, None, None, :, 0]
-        
-        if self.training:
-            attn = self.softmax_with_policy(attn, mask)
-        else:
-            attn = attn.softmax(dim=-1)
-            
-        attn = self.attn_drop(attn)
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        # Return attention map as well here
-        return x, attn
-    
 
 
 def make_tome_class(transformer_class):
@@ -294,7 +293,7 @@ Diffrate: Differentiable Compression Rate for Efficient Vision Transformers, ICC
     - code  (https://github.com/OpenGVLab/DiffRate)
 """
 def diffrate_apply_patch(
-    model: VisionTransformer, trace_source: bool = False, prune_granularity=1, merge_granularity=1
+    model: VisionTransformer, trace_source: bool = True, prune_granularity=1, merge_granularity=1
 ):
     """
     Applies DiffRate to this transformer.

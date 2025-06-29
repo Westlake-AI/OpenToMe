@@ -115,7 +115,7 @@ class MCTFBlock(Block):
             x, self._tome_info["size"], _ = mctf_merge_wavg(merge, x, metric, size=self._tome_info["size"],
                                                             one_step_ahead=self._tome_info["one_step_ahead"],
                                                             pooling_type=self._tome_info["pooling_type"],)
-        print(r, x.shape)
+        # print(r, x.shape)
         x = x + self._drop_path2(self.mlp(self.norm2(x)))
         return x
 

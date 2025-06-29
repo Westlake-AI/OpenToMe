@@ -1,3 +1,6 @@
+import os
+import os.path as osp
+import time
 import timm
 import torch
 from tqdm import tqdm
@@ -6,30 +9,43 @@ from opentome.tome import tome as tm
 from opentome.utils.datasets import dataset_loader, accuracy
 import argparse
 import logging
-import os
-import os.path as osp
-import time
 
 from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
 from PIL import Image
+from opentome.utils import tome_visulization
 
 
-def demo_eval(model):
+def demo_eval(model, work_dir, args):
     input_size = model.default_cfg["input_size"][1]
 
-    transform = transforms.Compose([
+    # Make sure the transform is correct for your model!
+    transform_list = [
         transforms.Resize(int((256 / 224) * input_size), interpolation=InterpolationMode.BICUBIC),
-        transforms.CenterCrop(input_size),
+        transforms.CenterCrop(input_size)
+    ]
+    # The visualization and model need different transforms
+    transform_vis  = transforms.Compose(transform_list)
+    transform_norm = transforms.Compose(transform_list + [
         transforms.ToTensor(),
         transforms.Normalize(model.default_cfg["mean"], model.default_cfg["std"]),
     ])
-
+    
     img = Image.open("./demo/n02510455_205.jpeg")
-    img = transform(img)[None, ...]
+    vis = transform_vis(img)
+    img = transform_norm(img)[None, ...]
     model.eval()
     outputs = model(img)
     print(outputs.topk(5).indices[0].tolist())
+
+    if args.save_vis:
+        attn_source = model._tome_info["source"]
+        if attn_source is None:
+            raise ValueError("The model does not support ToMe visualization. Please use a model that supports ToMe visualization.")
+        print(f"{attn_source.shape[1]} tokens at the end")
+        vis = tome_visulization.make_visualization(vis, attn_source, args.patch_size)
+        vis.save(osp.join(work_dir, '{}_{}_vis.png'.format(args.tome, attn_source.shape[1])))
+        print("Visualization saved...")
 
 
 def parse_args():
@@ -42,6 +58,7 @@ def parse_args():
     parser.add_argument('--merge_num', type=int, default=98, help='the number of merge tokens')
     parser.add_argument('--merge_ratio', type=float, default=None, help='the ratio of merge tokens in per layers')
     parser.add_argument('--inflect', type=float, default=-0.5, help='the inflect of merge ratio, default: -0.5')
+    parser.add_argument('--save_vis', type=bool, default=True, help='whether to save the visualization of the merge tokens')
     # Dataset parameters
     parser.add_argument('--input_size', type=int, default=None, help='the input resolution')
     parser.add_argument('--dataset', type=str, default='data/ImageNet/val', help='the dataset to use for evaluation')
@@ -178,7 +195,7 @@ def main():
         raise ValueError("Invalid ToMe implementation specified. Use 'tome' or 'none'.")
 
     # For debugging...
-    # demo_eval(model)
+    demo_eval(model, work_dir, args)
 
     # evaluate the model
     total_top1, total_top5 = 0, 0
@@ -199,6 +216,5 @@ def main():
 
 
 if __name__=="__main__":
-
     main()
 

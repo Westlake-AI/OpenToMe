@@ -188,16 +188,22 @@ class DTEMBlock(Block):
         metric = out_dict['metric']
         metric = metric / metric.norm(dim=-1, keepdim=True)
 
-        merge, _ = bipartite_soft_matching(metric, r=r, class_token=True)
-        x = merge(x * size[..., None], mode='sum')
-        size = merge(size[..., None], mode='sum')
-        x = x / size
-        return x, size[..., 0], x.size(1), None
+        merge, _ = bipartite_soft_matching(metric,
+                                           r,
+                                           self._tome_info["class_token"],
+                                           self._tome_info["distill_token"],
+                                           )
+        if self._tome_info["trace_source"]:
+            self._tome_info["source"] = merge_source(
+                merge, x, self._tome_info["source"]
+            )
+        x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
+        return x, self._tome_info["size"], x.size(1), None
 
     def merge(self, x, size, r, n, out_dict):
         return self._merge_train(x, size, r, n, out_dict) if self.training else self._merge_eval(x, size, r, out_dict)
 
-    def forward(self, x, size=None, n=None):
+    def forward(self, x, size, n=None):
         if size is None or n is None:
             tmp, _ = self.attn(self.norm1(x))
             x = x + self.drop_path1(self.ls1(tmp))
@@ -212,54 +218,8 @@ class DTEMBlock(Block):
                 x, size, n, out_dict = self.merge(x, size, r, n, out_dict)
             # print(r, x.shape)
             x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
+            
             return x, size, n, out_dict
-
-            
-"""
-    timm - mae patch
-"""
-class MAEDTEM(VisionTransformer):
-    def forward_features(self, x):
-        x = self.patch_embed(x)
-        x = self._pos_embed(x)
-        x = self.patch_drop(x)
-        x = self.norm_pre(x)
-        
-        # blocks
-        n = x.size(1)
-        size = torch.ones_like(x[..., 0])
-        r = self.r if isinstance(self.r, list) else [self.r for _ in range(len(self.blocks))]
-        out_dicts = []
-        for i, block in enumerate(self.blocks):
-            x, size, n, out_dict = block(x, size, r[i], n, prop_attn=True if self.training else False)
-            out_dicts.append(out_dict)
-        
-        if self.global_pool:
-            # Wheter prop_pool or not
-            x = (x[:, 1:] * size[..., None][:, 1:]).sum(dim=1) / size[..., None][:, 1:].sum(dim=1) if self.prop_pool else x[:, 1:n, :].mean(dim=1) 
-            outcome = self.fc_norm(x)
-        else:
-            x = self.norm(x)
-            outcome = x[:, 0]
-            
-        return outcome, out_dicts
-    
-    def update_r(self, r):
-        self.r = r
-
-    def patch(self, k2, tau1, tau2, prop_pool=False, feat_dim=None):
-        self.r = 0
-        self.prop_pool = prop_pool
-        for block in self.blocks:
-            block.__class__ = DTEMBlock
-            block.patch(k2, tau1, tau2, feat_dim)
-
-    def forward(self, x, return_out_dicts=False):
-        x, out_dicts = self.forward_features(x)
-        x = self.head(x)
-        if return_out_dicts:
-            return x, out_dicts
-        return x
 
 
 def make_tome_class(transformer_class):
@@ -276,14 +236,15 @@ def make_tome_class(transformer_class):
             x = self.norm_pre(x)
 
             n = x.size(1)
-            size = torch.ones_like(x[..., 0])
             self._tome_info["r"] = parse_r(
-                len(self.blocks), self.r, self._tome_info.get("total_merge", None)
+                len(self.blocks), self.r, self._tome_info["total_merge"]
             )
-            out_dicts = []
+            self._tome_info["size"] = torch.ones_like(x[..., 0, None])
+            self._tome_info["source"] = None
 
+            out_dicts = []
             for block in self.blocks:
-                x, size, n, out_dict = block(x, size=size, n=n)
+                x, size, n, out_dict = block(x, self._tome_info["size"], n=n)
                 out_dicts.append(out_dict)
 
             x = self.norm(x)
@@ -318,6 +279,8 @@ def dtem_apply_patch(
         "tau1": None,
         "tau2": None,
         "feat_dim": feat_dim,
+        "size": None,
+        "source": None,
         "total_merge": None,
         "trace_source": trace_source,
         "prop_attn": prop_attn,

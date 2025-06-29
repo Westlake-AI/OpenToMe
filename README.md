@@ -118,10 +118,27 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node
 ## Support Tasks
 
 - [x] Image Classification
+  - [x] ToMe
+  - [x] DiffRate
+  - [x] DETM
+  - [x] ToFu
+  - [x] MCTF
+  - [ ] CrossGET
+  - [x] PiToMe
+  - [x] DCT
 - [ ] Image Generation
 - [ ] M/LLM Inference 
 - [ ] Long Sequence
 - [ ] Throughput
 - [ ] AI for Science
+- [ ] ToMe Visualization
+  - [x] ToMe
+  - [x] DiffRate
+  - [x] DETM
+  - [x] ToFu
+  - [x] MCTF
+  - [ ] CrossGET
+  - [x] PiToMe
+  - [ ] DCT
 
 <p align="right">(<a href="#top">back to top</a>)</p>
