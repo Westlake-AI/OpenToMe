@@ -120,7 +120,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node
 - [x] Image Classification
   - [x] ToMe
   - [x] DiffRate
-  - [x] DETM
+  - [x] DTEM
   - [x] ToFu
   - [x] MCTF
   - [ ] CrossGET
@@ -134,7 +134,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node
 - [ ] ToMe Visualization
   - [x] ToMe
   - [x] DiffRate
-  - [x] DETM
+  - [x] DTEM
   - [x] ToFu
   - [x] MCTF
   - [ ] CrossGET
