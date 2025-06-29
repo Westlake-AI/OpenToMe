@@ -6,8 +6,9 @@
 # --------------------------------------------------------
 
 import math
+import numpy as np
 from typing import Callable, List, Tuple, Union
-
+import torch.nn.functional as F
 import torch
 
 
@@ -15,6 +16,105 @@ def do_nothing(x, mode=None):
     return x
 
 
+def parse_r(
+    num_layers: int, r: Union[List[int], Tuple[int, float], int], total: int = None
+) -> List[int]:
+    """
+    Process a constant r or r schedule into a list for use internally.
+
+    r can take the following forms:
+     - int: A constant number of tokens per layer.
+     - Tuple[int, float]: A pair of r, inflection.
+       Inflection describes there the the reduction / layer should trend
+       upward (+1), downward (-1), or stay constant (0). A value of (r, 0)
+       is as providing a constant r. (r, -1) is what we describe in the paper
+       as "decreasing schedule". Any value between -1 and +1 is accepted.
+     - List[int]: A specific number of tokens per layer. For extreme granularity.
+    total: The predefined total number of merged tokens.
+    """
+    inflect = 0
+    if isinstance(r, list):
+        if len(r) < num_layers:
+            r = r + [0] * (num_layers - len(r))
+        return list(r)
+    elif isinstance(r, tuple):
+        r, inflect = r
+
+    min_val = int(r * (1.0 - inflect))
+    max_val = 2 * r - min_val
+    step = (max_val - min_val) / (num_layers - 1)
+    r_list = [int(min_val + step * i) for i in range(num_layers)]
+
+    if total is not None:
+        remainder = total - sum(r_list)
+        if remainder != 0:
+            if inflect < 0:
+                r_list[0] += remainder
+            else:
+                r_list[-1] += remainder
+
+    return r_list
+
+
+def check_parse_r(
+    num_layers: int, merge_num: int, total_num: int, r_inflect: float=0., sqrt: bool=False
+):
+    """
+    Check the best merge ratio for the given 
+    """
+    gap = 1e10
+    best_r = 0
+    for i in range(merge_num):
+        r_list = parse_r(num_layers, (i, r_inflect))
+        gap_ = sum(r_list) - merge_num
+        if gap > abs(gap_):
+            keep_num = total_num - sum(r_list)
+            if sqrt and int(keep_num ** 0.5) ** 2 != keep_num:
+                continue
+            best_r = i
+            gap = abs(gap_)
+        else:
+            if gap < abs(gap_):
+                break
+
+    return best_r
+
+
+def merge_wavg(
+    merge: Callable, x: torch.Tensor, size: torch.Tensor = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Applies the merge function by taking a weighted average based on token size.
+    Returns the merged tensor and the new token sizes.
+    """
+    if size is None:
+        size = torch.ones_like(x[..., 0, None])
+
+    x = merge(x * size, mode="sum")
+    size = merge(size, mode="sum")
+
+    x = x / size
+    return x, size
+
+
+def merge_source(
+    merge: Callable, x: torch.Tensor, source: torch.Tensor = None
+) -> torch.Tensor:
+    """
+    For source tracking. Source is an adjacency matrix between the initial tokens and final merged groups.
+    x is used to find out how many tokens there are in case the source is None.
+    """
+    if source is None:
+        n, t, _ = x.shape
+        source = torch.eye(t, device=x.device)[None, ...].expand(n, t, t)
+
+    source = merge(source, mode="amax")
+    return source
+
+
+"""
+    ToMe/ToFu/DETM specific functions
+"""
 def bipartite_soft_matching(
     metric: torch.Tensor,
     r: int,
@@ -222,6 +322,9 @@ def random_bipartite_soft_matching(
     return merge, unmerge
 
 
+"""
+    MCTF specific functions
+"""
 def mctf_bipartite_soft_matching(
     metric: torch.Tensor,
     r: int,
@@ -355,6 +458,7 @@ def mctf_bipartite_soft_matching(
 
     return merge, unmerge
 
+
 def mctf_merge_wavg(
         merge: Callable, x: torch.Tensor, attn: torch.Tensor, size: torch.Tensor = None, 
         one_step_ahead = 0, pooling_type = 'none'
@@ -413,8 +517,150 @@ def mctf_merge_wavg(
     return x, size, attn_n
 
 
-def merge_wavg(
-    merge: Callable, x: torch.Tensor, size: torch.Tensor = None
+"""
+    DCT specific functions
+"""
+def dc_matching(
+    metric: torch.Tensor,
+    r: int,
+    class_token: bool = False,
+) -> Tuple[Callable, Callable]:
+    
+    def dct(metric, norm=None):
+
+        metric_shape = metric.shape
+        n = metric_shape[-1]
+        metric = metric.contiguous().view(-1, n)
+
+        v = torch.cat([metric[:, ::2], metric[:, 1::2].flip([1])], dim=1)
+        Vc = torch.fft.fft(v, dim=1)
+
+        k = - torch.arange(n, dtype=metric.dtype, device=metric.device)[None, :] * np.pi / (2 * n)
+        V = Vc.real * torch.cos(k) - Vc.imag * torch.sin(k)
+
+        if norm == 'ortho':
+            V[:, 0] /= np.sqrt(n) * 2
+            V[:, 1:] /= np.sqrt(n / 2) * 2
+        V = 2 * V.view(*metric_shape)
+        return V
+    
+    def idct(metric, norm=None):
+
+        metric_shape = metric.shape
+        n = metric_shape[-1]
+        metric = metric.contiguous().view(-1, n) / 2
+
+        if norm == 'ortho':
+            metric[:, 0] *= np.sqrt(n) * 2
+            metric[:, 1:] *= np.sqrt(n / 2) * 2
+
+        k = torch.arange(n, dtype = metric.dtype, device = metric.device)[None, :] * np.pi / (2 * n)
+        W_r = torch.cos(k)
+        W_i = torch.sin(k)
+
+        V_t_r = metric
+        V_t_i = torch.cat([metric[:, :1] * 0, -metric.flip([1])[:, :-1]], dim=1)
+
+        V_r = V_t_r * W_r - V_t_i * W_i
+        V_i = V_t_r * W_i + V_t_i * W_r
+
+        V = torch.cat([V_r.unsqueeze(2), V_i.unsqueeze(2)], dim=2)
+        V = torch.view_as_complex(V)
+
+        v = torch.fft.ifft(V, dim=1).real
+        x = v.new_zeros(v.shape)
+        x[:, ::2] += v[:, :n - (n // 2)]
+        x[:, 1::2] += v.flip([1])[:, :n // 2]
+
+        return x.view(*metric_shape)
+    
+    if class_token:
+        cls = metric[:, 0, :].unsqueeze_(1)
+        metric = metric[:, 1:, :]
+    t = metric.shape[1]
+    r = min(r, t // 2)
+
+    metric = metric.type(torch.float32).permute(1, 0, 2)
+
+    dct_metric = dct(metric.transpose(0, 2), norm='ortho').transpose(0, 2)
+
+    # feel free to play with any method here
+    if r is not None: 
+        dct_metric = dct_metric[:t - r, :, :]
+
+    metric = idct(dct_metric.transpose(0, 2), norm='ortho').transpose(0, 2).permute(1, 0, 2)
+
+    if class_token:
+        return torch.cat([cls, metric], dim=1)
+    return metric
+
+
+"""
+    CrossGet still in development, not used in the paper yet
+""" 
+def crossget_bipartite_soft_matching(
+    r: int,
+    metric: torch.Tensor,
+    query_token: torch.Tensor,
+    class_token: bool = False,
+    distill_token: bool = False,
+):
+    
+    protected = 0
+    if class_token:
+        protected += 1
+    if distill_token:
+        protected += 1
+
+    # We can only reduce by a maximum of 50% tokens
+    b, t, _ = metric.shape
+    r = min(r, (t - protected) // 2)
+
+    if r <= 0:
+        return do_nothing, do_nothing
+    
+    with torch.no_grad():
+
+        metric = metric / metric.norm(dim=-1, keepdim=True)
+        score = metric @ metric.transpose(-1, -2)
+        score += torch.empty_like(score).fill_(-math.inf).tril_().triu_()
+        if class_token:
+            score[:, 0, :] = score[:, :, 0] = -math.inf
+            score[:, -1, :] = score[:, :, -1] = -math.inf
+        else:
+            score[:, 0, :] = score[:, :, 0] = -math.inf
+
+        edge_idx = torch.max(score, dim=-1, keepdim=True)[0].argsort(dim=1, descending=True).expand(-1, -1, t)
+        mask = score.scatter(1, edge_idx, torch.empty_like(score).fill_(-math.inf).tril_())
+        mask = score.scatter(-1, edge_idx.transpose(-1, -2), mask)
+        importance = torch.mean(query_token[..., :-1], dim=-1, keepdim=True) + query_token[..., -1, None] 
+        edge_idx = (importance - torch.max(score + mask, dim=-1, keepdim=True)[0]).argsort(dim=1, descending=False)
+        src_idx, dst_all_idx = edge_idx[..., :r, :], edge_idx[..., r:, :]  
+        
+        score = score.gather(dim=1, index=src_idx.expand(-1, -1, t)).gather(dim=-1, index=dst_all_idx.transpose(-1, -2).expand(-1, r, -1))
+        dst_idx = score.argmax(dim=-1)[..., None]
+        weight_src = importance.gather(dim=1, index=src_idx)
+        weight_dst = importance.gather(dim=1, index=dst_all_idx).gather(dim=1, index=dst_idx)
+        weight = F.softmax(torch.cat([weight_src, weight_dst], dim=-1), dim=-1)
+
+        def crossget_merge(x):
+            c = x.shape[-1]
+            src = x.gather(dim=1, index=src_idx.expand(-1, -1, c))
+            dst = x.gather(dim=1, index=dst_all_idx.expand(-1, -1, c))
+            if weight is not None:
+                weight *= weight.shape[-1]
+                dst = dst.scatter_add(1, dst_idx.expand(-1, -1, c), weight[..., 0, None] * src + \
+                     (weight[..., 1, None] - 1) * dst.gather(dim=1, index=dst_idx.expand(-1, -1, c)))
+            else:
+                dst = dst.scatter_add(1, dst_idx.expand(-1, -1, c), src)
+            out = dst.gather(dim=1, index=dst_all_idx.argsort(dim=1).expand(-1, -1, c)) # gather for keeping order
+            return out
+
+        return crossget_merge, weight
+
+
+def cross_merge_wavg(
+    crossget_merge: Callable, x: torch.Tensor, size: torch.Tensor = None, weight: torch.Tensor = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Applies the merge function by taking a weighted average based on token size.
@@ -423,87 +669,8 @@ def merge_wavg(
     if size is None:
         size = torch.ones_like(x[..., 0, None])
 
-    x = merge(x * size, mode="sum")
-    size = merge(size, mode="sum")
+    x = crossget_merge(x * size, weight)
+    size = crossget_merge(size)
 
     x = x / size
     return x, size
-
-
-def merge_source(
-    merge: Callable, x: torch.Tensor, source: torch.Tensor = None
-) -> torch.Tensor:
-    """
-    For source tracking. Source is an adjacency matrix between the initial tokens and final merged groups.
-    x is used to find out how many tokens there are in case the source is None.
-    """
-    if source is None:
-        n, t, _ = x.shape
-        source = torch.eye(t, device=x.device)[None, ...].expand(n, t, t)
-
-    source = merge(source, mode="amax")
-    return source
-
-
-def parse_r(
-    num_layers: int, r: Union[List[int], Tuple[int, float], int], total: int = None
-) -> List[int]:
-    """
-    Process a constant r or r schedule into a list for use internally.
-
-    r can take the following forms:
-     - int: A constant number of tokens per layer.
-     - Tuple[int, float]: A pair of r, inflection.
-       Inflection describes there the the reduction / layer should trend
-       upward (+1), downward (-1), or stay constant (0). A value of (r, 0)
-       is as providing a constant r. (r, -1) is what we describe in the paper
-       as "decreasing schedule". Any value between -1 and +1 is accepted.
-     - List[int]: A specific number of tokens per layer. For extreme granularity.
-    total: The predefined total number of merged tokens.
-    """
-    inflect = 0
-    if isinstance(r, list):
-        if len(r) < num_layers:
-            r = r + [0] * (num_layers - len(r))
-        return list(r)
-    elif isinstance(r, tuple):
-        r, inflect = r
-
-    min_val = int(r * (1.0 - inflect))
-    max_val = 2 * r - min_val
-    step = (max_val - min_val) / (num_layers - 1)
-    r_list = [int(min_val + step * i) for i in range(num_layers)]
-
-    if total is not None:
-        remainder = total - sum(r_list)
-        if remainder != 0:
-            if inflect < 0:
-                r_list[0] += remainder
-            else:
-                r_list[-1] += remainder
-
-    return r_list
-
-
-def check_parse_r(
-    num_layers: int, merge_num: int, total_num: int, r_inflect: float=0., sqrt: bool=False
-):
-    """
-    Check the best merge ratio for the given 
-    """
-    gap = 1e10
-    best_r = 0
-    for i in range(merge_num):
-        r_list = parse_r(num_layers, (i, r_inflect))
-        gap_ = sum(r_list) - merge_num
-        if gap > abs(gap_):
-            keep_num = total_num - sum(r_list)
-            if sqrt and int(keep_num ** 0.5) ** 2 != keep_num:
-                continue
-            best_r = i
-            gap = abs(gap_)
-        else:
-            if gap < abs(gap_):
-                break
-
-    return best_r

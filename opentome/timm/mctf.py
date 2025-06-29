@@ -115,7 +115,7 @@ class MCTFBlock(Block):
             x, self._tome_info["size"], _ = mctf_merge_wavg(merge, x, metric, size=self._tome_info["size"],
                                                             one_step_ahead=self._tome_info["one_step_ahead"],
                                                             pooling_type=self._tome_info["pooling_type"],)
-        print(r, x.shape)
+        # print(r, x.shape)
         x = x + self._drop_path2(self.mlp(self.norm2(x)))
         return x
 
@@ -138,7 +138,11 @@ def make_tome_class(transformer_class):
     return MCTFVisionTransformer
 
 
-
+"""
+Multi-criteria Token Fusion with One-step-ahead Attention for Efficient Vision Transformers, CVPR'2024
+    - paper (https://arxiv.org/abs/2403.10030)
+    - code  (https://github.com/mlvlab/MCTF)
+"""
 def mctf_apply_patch(
     model: VisionTransformer, trace_source: bool = True, prop_attn: bool = True
 ):
