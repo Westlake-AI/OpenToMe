@@ -123,7 +123,7 @@ def main():
         elif args.merge_ratio is None and args.merge_num is not None:
             merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
                                     (model.default_cfg["input_size"][1]/args.patch_size) ** 2, args.inflect)
-        # update _ome_info
+        # update _tome_info
         model.r = (merge_ratio, args.inflect)
         model._tome_info["r"] = model.r
         model._tome_info["total_merge"] = args.merge_num
@@ -137,7 +137,7 @@ def main():
         elif args.merge_ratio is None and args.merge_num is not None:
             merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
                                     (model.default_cfg["input_size"][1]/args.patch_size) ** 2, args.inflect)
-        # update _ome_info
+        # update _tome_info
         model.r = (merge_ratio, args.inflect)
         model._tome_info["r"] = model.r
         model._tome_info["k2"] = 3
@@ -161,7 +161,7 @@ def main():
         elif args.merge_ratio is None and args.merge_num is not None:
             merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
                                     (model.default_cfg["input_size"][1]/args.patch_size) ** 2, args.inflect)
-        # update _ome_info
+        # update _tome_info
         model.r = (merge_ratio, args.inflect)
         model._tome_info["r"] = model.r
         model._tome_info["total_merge"] = args.merge_num

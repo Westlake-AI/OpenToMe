@@ -126,7 +126,11 @@ def make_tome_class(transformer_class):
     return PiToMeVisionTransformer
 
 
-
+""""
+Accelerating Transformers with Spectrum-Preserving Token Merging, NIPS'2024
+    - paper (https://arxiv.org/abs/2405.16148) 
+    - code  (https://github.com/hchautran/PiToMe)
+"""
 def pitome_apply_patch(
    model: VisionTransformer, trace_source: bool = False, prop_attn: bool = False):
 

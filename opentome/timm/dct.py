@@ -79,8 +79,7 @@ def make_tome_class(transformer_class):
 """
 Fourier Transformer: Fast Long Range Modeling by Removing Sequence Redundancy with FFT Operator, ACL'2023
     - paper (https://arxiv.org/abs/2305.15099)
-    - code (https://github.com/LUMIA-Group/FourierTransformer)
-
+    - code  (https://github.com/LUMIA-Group/FourierTransformer)
 """
 def dct_apply_patch(
     model: VisionTransformer, trace_source: bool = True, prop_attn: bool = True
