@@ -1,7 +1,7 @@
 import timm
 import torch
 from tqdm import tqdm
-from opentome.timm import tome, dtem, diffrate, tofu, mctf, crossget, dct
+from opentome.timm import tome, dtem, diffrate, tofu, mctf, crossget, dct, pitome
 from opentome.tome import tome as tm
 from opentome.utils.datasets import dataset_loader, accuracy
 import argparse
@@ -88,7 +88,8 @@ def main():
         raise ValueError(f"Model '{args.model_name}' could not be created.")
     logger.info(f"Model {args.model_name} loaded successfully.")
 
-    # build the dataloader  -->  /path/imagenet/
+    # build the dataloader  -->  /path/imagenet/ 
+    #                       --> e.g. yuchang/lsy/.cache/imagenet/val
     if not osp.exists(args.dataset):
         logger.info(f"Error: Dataset path '{args.dataset}' does not exist.")
         raise FileNotFoundError(f"Dataset path '{args.dataset}' does not exist.")
@@ -104,7 +105,7 @@ def main():
 
     assert args.merge_num >= 0, "Please specify a positive merge number."
     assert args.inflect in [-0.5, 1, 2], "Please specify a valid inflect value."
-    if args.tome in ['tome', 'tofu', 'crossget', 'dct']:
+    if args.tome in ['tome', 'tofu', 'crossget', 'dct', "pitome"]:
         if args.tome == 'tome':
             tome.tome_apply_patch(model, trace_source=True)
         elif args.tome == 'tofu':
@@ -113,6 +114,8 @@ def main():
             crossget.crossget_apply_patch(model, trace_source=True)
         elif args.tome == 'dct':
             dct.dct_apply_patch(model, trace_source=True)
+        elif args.tome == 'pitome':
+            pitome.pitome_apply_patch(model, trace_source=True)
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support ToMe/ToFu/CrossGET. Please use a model that supports ToMe.")
         if args.merge_ratio is not None and args.merge_num is None:

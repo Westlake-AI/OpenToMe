@@ -115,4 +115,13 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node
 - [x] **DCT [ACL2023]** Fourier Transformer: Fast Long Range Modeling by Removing Sequence Redundancy with FFT Operator [paper](https://arxiv.org/abs/2305.15099) [code](https://github.com/LUMIA-Group/FourierTransformer)
 
 
+## Support Tasks
+
+- [x] Image Classification
+- [ ] Image Generation
+- [ ] M/LLM Inference 
+- [ ] Long Sequence
+- [ ] Throughput
+- [ ] AI for Science
+
 <p align="right">(<a href="#top">back to top</a>)</p>
