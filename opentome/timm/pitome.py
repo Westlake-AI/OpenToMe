@@ -88,14 +88,14 @@ class PiToMeBlock(Block):
             merge, _ = pitome_vision(
                                     metric,
                                     r,
-                                    margin = self.margin,
                                     class_token = self._tome_info["class_token"],
+                                    distill_token = self._tome_info["distill_token"],
+                                    margin = self.margin,
                                     use_bsm_pitome = use_bsm_pitome
                                 )
             if self._tome_info["trace_source"]:
-                self._tome_info["source"] = merge_source(
-                    merge, x, self._tome_info["source"]
-                )
+                self._tome_info["source"] = merge_source(merge, x, self._tome_info["source"])
+
             x,  self._tome_info["size"]  = merge_wavg(merge, x ,self._tome_info["size"]) 
         # print(r, x.shape, self.margin, use_bsm_pitome)
         
@@ -139,8 +139,7 @@ def pitome_apply_patch(
     model.__class__ = PiToMeVisionTransformer
     model.r = 0 
     model._tome_info = {
-        "ratio": model.r,
-        "margin": [],
+        "r": model.r,
         "size": None,
         "source": None,
         "total_merge": None,
@@ -148,6 +147,9 @@ def pitome_apply_patch(
         "prop_attn": prop_attn,
         "class_token": getattr(model, 'cls_token', None) is not None,
         "distill_token": getattr(model, 'dist_token', None) is not None,
+        # PiToMe hyperparameters
+        "margin": [],
+
     }
 
     margins = [.75 - .75 * (i / len(model.blocks)) for i in range(len(model.blocks))]

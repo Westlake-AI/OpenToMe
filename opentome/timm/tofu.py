@@ -79,9 +79,8 @@ class ToFuBlock(Block):
                 self._tome_info["distill_token"],
             )
             if self._tome_info["trace_source"]:
-                self._tome_info["source"] = merge_source(
-                    merge, x, self._tome_info["source"]
-                )
+                self._tome_info["source"] = merge_source(merge, x, self._tome_info["source"])
+                
             x = merge(x, mode=self.strategy)
 
         # print(r, x.shape, self.strategy)

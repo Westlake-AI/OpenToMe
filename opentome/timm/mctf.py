@@ -97,11 +97,11 @@ class MCTFBlock(Block):
         if r > 0:
             # Apply ToMe here
             merge, _ = mctf_bipartite_soft_matching(
-                metric = x_,
-                r = r,
-                attn = metric,
+                x_,
+                r,
                 class_token = self._tome_info["class_token"],
                 distill_token = self._tome_info["distill_token"],
+                attn = metric,
                 tau_sim = self._tome_info["tau_sim"],
                 tau_info = self._tome_info["tau_info"],
                 tau_size = self._tome_info["tau_size"],
@@ -109,12 +109,16 @@ class MCTFBlock(Block):
                 bidirection = self._tome_info["bidirection"]
             )
             if self._tome_info["trace_source"]:
-                self._tome_info["source"] = merge_source(
-                    merge, x, self._tome_info["source"]
-                )
-            x, self._tome_info["size"], _ = mctf_merge_wavg(merge, x, metric, size=self._tome_info["size"],
-                                                            one_step_ahead=self._tome_info["one_step_ahead"],
-                                                            pooling_type=self._tome_info["pooling_type"],)
+                self._tome_info["source"] = merge_source(merge, x, self._tome_info["source"])
+            
+            x, self._tome_info["size"], _ = mctf_merge_wavg(
+                                                    merge, 
+                                                    x, 
+                                                    size=self._tome_info["size"], 
+                                                    metric,
+                                                    one_step_ahead=self._tome_info["one_step_ahead"],
+                                                    pooling_type=self._tome_info["pooling_type"]
+                                                )
         # print(r, x.shape)
         x = x + self._drop_path2(self.mlp(self.norm2(x)))
         return x
@@ -170,6 +174,7 @@ def mctf_apply_patch(
         "prop_attn": prop_attn,
         "class_token": getattr(model, 'cls_token', None) is not None,
         "distill_token": getattr(model, 'dist_token', None) is not None,
+        # MCFT hyperparameters
         "one_step_ahead": 1,
         "tau_sim": 1,
         "tau_info": 0,

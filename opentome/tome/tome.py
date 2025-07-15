@@ -81,7 +81,9 @@ def check_parse_r(
 
 
 def merge_wavg(
-    merge: Callable, x: torch.Tensor, size: torch.Tensor = None
+    merge: Callable, 
+    x: torch.Tensor, 
+    size: torch.Tensor = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Applies the merge function by taking a weighted average based on token size.
@@ -98,7 +100,9 @@ def merge_wavg(
 
 
 def merge_source(
-    merge: Callable, x: torch.Tensor, source: torch.Tensor = None
+    merge: Callable, 
+    x: torch.Tensor, 
+    source: torch.Tensor = None
 ) -> torch.Tensor:
     """
     For source tracking. Source is an adjacency matrix between the initial tokens and final merged groups.
@@ -330,12 +334,12 @@ def mctf_bipartite_soft_matching(
     r: int,
     class_token: bool,
     distill_token: bool,
+    attn : torch.Tensor,
     tau_sim: int=1,
     tau_info: int=1,
     tau_size: int=1,
     bidirection: int=True,
     size : torch.Tensor=None,
-    attn : torch.Tensor=None,
 ) -> Tuple[Callable, Callable]:
 
     protected = 0
@@ -460,8 +464,12 @@ def mctf_bipartite_soft_matching(
 
 
 def mctf_merge_wavg(
-        merge: Callable, x: torch.Tensor, attn: torch.Tensor, size: torch.Tensor = None, 
-        one_step_ahead = 0, pooling_type = 'none'
+        merge: Callable, 
+        x: torch.Tensor, 
+        size: torch.Tensor = None,
+        attn: torch.Tensor, 
+        one_step_ahead = 0, 
+        pooling_type = 'none'
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Applies the merge function by taking a weighted average based on token size.
@@ -523,7 +531,8 @@ def mctf_merge_wavg(
 def dc_matching(
     metric: torch.Tensor,
     r: int,
-    class_token: bool = False,
+    class_token: bool,
+    distill_token: bool,
 ) -> Tuple[Callable, Callable]:
     
     def dct(metric, norm=None):
@@ -599,12 +608,12 @@ def dc_matching(
     CrossGet still in development, not used in the paper yet
 """ 
 def crossget_bipartite_soft_matching(
-    r: int,
     metric: torch.Tensor,
+    r: int,
+    class_token: bool,
+    distill_token: bool,
     query_token: torch.Tensor,
-    class_token: bool = False,
-    distill_token: bool = False,
-):
+)-> Tuple[Callable, Callable]:
     
     protected = 0
     if class_token:
@@ -660,7 +669,10 @@ def crossget_bipartite_soft_matching(
 
 
 def cross_merge_wavg(
-    crossget_merge: Callable, x: torch.Tensor, size: torch.Tensor = None, weight: torch.Tensor = None
+    crossget_merge: Callable, 
+    x: torch.Tensor, 
+    size: torch.Tensor = None, 
+    weight: torch.Tensor = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Applies the merge function by taking a weighted average based on token size.

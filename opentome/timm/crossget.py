@@ -83,11 +83,11 @@ class CrossGetBlock(Block):
         r = self._tome_info["r"].pop(0)
         if r > 0:
             merge = crossget_bipartite_soft_matching(
-                r,
                 metric,
-                query_token,
+                r,
                 class_token=self._tome_info["class_token"],
                 distill_token=self._tome_info["distill_token"],
+                query_token,
             )
             x, self._tome_info["size"] = cross_merge_wavg(merge, x, self._tome_info["size"])
         print(r, x.shape)
