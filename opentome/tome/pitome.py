@@ -94,14 +94,16 @@ def pitome_bipartite_soft_matching(
 def pitome_vision(
     metric: torch.Tensor, 
     r: int,
-    margin:torch.Tensor=0.5,
     class_token: bool = False,
+    distill_token: bool = False,
+    margin:torch.Tensor=0.5,
     alpha=1.0,
     use_bsm=False,
     use_bsm_pitome=False,
 ):
     if use_bsm:
-        return bipartite_soft_matching(metric=metric, r=r, class_token=class_token)
+        return bipartite_soft_matching(metric=metric, r=r, 
+                        class_token=class_token, distill_token=distill_token)
     
     with torch.no_grad():
         if class_token:

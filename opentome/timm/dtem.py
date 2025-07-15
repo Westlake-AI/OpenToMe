@@ -194,9 +194,8 @@ class DTEMBlock(Block):
                                            self._tome_info["distill_token"],
                                            )
         if self._tome_info["trace_source"]:
-            self._tome_info["source"] = merge_source(
-                merge, x, self._tome_info["source"]
-            )
+            self._tome_info["source"] = merge_source(merge, x, self._tome_info["source"])
+
         x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
         return x, self._tome_info["size"], x.size(1), None
 
@@ -275,10 +274,6 @@ def dtem_apply_patch(
     model.r = 0
     model._tome_info = {
         "r": 0,
-        "k2": None,
-        "tau1": None,
-        "tau2": None,
-        "feat_dim": feat_dim,
         "size": None,
         "source": None,
         "total_merge": None,
@@ -286,6 +281,11 @@ def dtem_apply_patch(
         "prop_attn": prop_attn,
         "class_token": getattr(model, 'cls_token', None) is not None,
         "distill_token": getattr(model, 'dist_token', None) is not None,
+        # DTEM hyperparameters
+        "k2": None,
+        "tau1": None,
+        "tau2": None,
+        "feat_dim": feat_dim,
     }
 
     for module in model.modules():
