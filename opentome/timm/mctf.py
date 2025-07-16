@@ -18,7 +18,8 @@ from timm.models.vision_transformer import VisionTransformer, LayerScale
 from timm.models.vision_transformer import Attention as TimmAttention
 from timm.models.vision_transformer import Block as TimmBlock
 
-from opentome.tome.tome import mctf_bipartite_soft_matching, merge_source, mctf_merge_wavg, parse_r
+from opentome.tome.tome import merge_source, parse_r
+from opentome.tome.mctf import mctf_bipartite_soft_matching, mctf_merge_wavg
 from opentome.timm import Attention, Block
 
 try:
@@ -67,10 +68,17 @@ class MCTFAttention(Attention):
         x = self.proj_drop(x)
 
         # Return k as well here
-        if return_attn:
-            return x, attn_
-        else:
-            return x, k.mean(dim=1)
+        metric = dict(
+            metric = k.mean(1),
+            attn = attn_,
+        )
+
+        return x, metric
+
+        # if return_attn:
+        #     return x, attn_
+        # else:
+        #     return x, k.mean(dim=1)
 
 
 class MCTFBlock(Block):
@@ -90,35 +98,36 @@ class MCTFBlock(Block):
 
         x_ = x.clone()
         attn_size = self._tome_info["size"] if self._tome_info["prop_attn"] else None
-        x_attn, metric = self.attn(self.norm1(x), attn_size, return_attn=True)   # In MCTF, we return the attention metric, not k.mean(dim=1)
+        x_attn, metric = self.attn(self.norm1(x), attn_size, return_attn=self._tome_info["return_attn"])   # In MCTF, we return the attention metric, not k.mean(dim=1)
+        assert isinstance(metric['metric'], (float, torch.Tensor)), "metric not a float or torch.Tensor"
+        assert isinstance(metric['attn'], (float, torch.Tensor)), "attn not a float or torch.Tensor"
         x = x + self._drop_path1(x_attn)
-
         r = self._tome_info["r"].pop(0)
         if r > 0:
             # Apply ToMe here
             merge, _ = mctf_bipartite_soft_matching(
-                x_,
-                r,
-                class_token = self._tome_info["class_token"],
-                distill_token = self._tome_info["distill_token"],
-                attn = metric,
-                tau_sim = self._tome_info["tau_sim"],
-                tau_info = self._tome_info["tau_info"],
-                tau_size = self._tome_info["tau_size"],
-                size = self._tome_info["size"],
-                bidirection = self._tome_info["bidirection"]
-            )
+                            x_,
+                            r,
+                            class_token = self._tome_info["class_token"],
+                            distill_token = self._tome_info["distill_token"],
+                            attn = metric["attn"] if self._tome_info["return_attn"] else metric["metric"],
+                            tau_sim = self._tome_info["tau_sim"],
+                            tau_info = self._tome_info["tau_info"],
+                            tau_size = self._tome_info["tau_size"],
+                            size = self._tome_info["size"],
+                            bidirection = self._tome_info["bidirection"]
+                        )
             if self._tome_info["trace_source"]:
                 self._tome_info["source"] = merge_source(merge, x, self._tome_info["source"])
             
             x, self._tome_info["size"], _ = mctf_merge_wavg(
-                                                    merge, 
-                                                    x, 
-                                                    size=self._tome_info["size"], 
-                                                    metric,
-                                                    one_step_ahead=self._tome_info["one_step_ahead"],
-                                                    pooling_type=self._tome_info["pooling_type"]
-                                                )
+                                                merge, 
+                                                x, 
+                                                size=self._tome_info["size"], 
+                                                metric = metric["attn"] if self._tome_info["return_attn"] else metric["k_mean"],
+                                                one_step_ahead=self._tome_info["one_step_ahead"],
+                                                pooling_type=self._tome_info["pooling_type"]
+                                            )
         # print(r, x.shape)
         x = x + self._drop_path2(self.mlp(self.norm2(x)))
         return x
@@ -181,6 +190,7 @@ def mctf_apply_patch(
         "tau_size": 0,
         "bidirection": True,
         "pooling_type": 'none', # ['none', 'max', 'mean]
+        "return_attn": True,    # TODO need to support k.mean(1) as the metric, not only attention
     }
 
     if hasattr(model, "dist_token") and model.dist_token is not None:

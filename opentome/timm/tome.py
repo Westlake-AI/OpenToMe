@@ -64,7 +64,11 @@ class ToMeAttention(Attention):
         x = self.proj_drop(x)
 
         # Return k as the metric
-        return x, k.mean(1)
+        metric = dict(
+            metric = k.mean(1)
+        )
+
+        return x, metric
 
 
 class ToMeBlock(Block):
@@ -84,13 +88,13 @@ class ToMeBlock(Block):
         # Note: this is copied from timm.models.vision_transformer.Block with modifications.
         attn_size = self._tome_info["size"] if self._tome_info["prop_attn"] else None
         x_attn, metric = self.attn(self.norm1(x), attn_size)
+        assert isinstance(metric['metric'], (float, torch.Tensor)), "metric not a float or torch.Tensor"
         x = x + self._drop_path1(self.ls1(x_attn))
-
         r = self._tome_info["r"].pop(0)
         if r > 0:
             # Apply ToMe here
             merge, _ = bipartite_soft_matching(
-                metric,
+                metric['metric'],
                 r,
                 self._tome_info["class_token"],
                 self._tome_info["distill_token"],
