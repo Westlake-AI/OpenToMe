@@ -59,7 +59,11 @@ class PiToMeAttention(Attention):
         x = self.proj(x)
         x = self.proj_drop(x)
 
-        return x, k.mean(1)
+        metric = dict(
+            metric = k.mean(1)
+        )
+
+        return x, metric
     
 
 class PiToMeBlock(Block):
@@ -80,19 +84,19 @@ class PiToMeBlock(Block):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_attn, metric = self.attn(self.norm1(x))
+        assert isinstance(metric['metric'], (float, torch.Tensor)), "metric not a float or torch.Tensor"
         x = x + self._drop_path1(x_attn)
-
         r = self._tome_info["r"].pop(0)
         use_bsm_pitome = self._tome_info["use_bsm_pitome"].pop(0)
         if r > 0:
             merge, _ = pitome_vision(
-                                    metric,
-                                    r,
-                                    class_token = self._tome_info["class_token"],
-                                    distill_token = self._tome_info["distill_token"],
-                                    margin = self.margin,
-                                    use_bsm_pitome = use_bsm_pitome
-                                )
+                            metric['metric'],
+                            r,
+                            class_token = self._tome_info["class_token"],
+                            distill_token = self._tome_info["distill_token"],
+                            margin = self.margin,
+                            use_bsm_pitome = use_bsm_pitome
+                        )
             if self._tome_info["trace_source"]:
                 self._tome_info["source"] = merge_source(merge, x, self._tome_info["source"])
 

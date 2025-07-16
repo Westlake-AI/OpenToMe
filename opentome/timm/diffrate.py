@@ -18,7 +18,7 @@ from timm.models.vision_transformer import VisionTransformer, LayerScale
 from timm.models.vision_transformer import Attention as TimmAttention
 from timm.models.vision_transformer import Block as TimmBlock
 
-from opentome.tome.tome import bipartite_soft_matching, merge_source, merge_wavg, parse_r
+# from opentome.tome.tome import bipartite_soft_matching, merge_source, merge_wavg, parse_r
 from opentome.timm import Attention, Block
 
 # import DiffRate.ddp as ddp
@@ -78,7 +78,11 @@ class DiffRateAttention(Attention):
         x = self.proj(x)
         x = self.proj_drop(x)
         # Return attention map as well here
-        return x, attn
+        metric = dict(
+            metric = attn
+        )
+
+        return x, metric
 
 
 class DiffRateBlock(Block):
@@ -103,11 +107,12 @@ class DiffRateBlock(Block):
         # Note: this is copied from timm.models.vision_transformer.Block with modifications.
         size = self._tome_info["size"]
         mask = self._tome_info["mask"]
-        x_attn, attn = self.attn(self.norm1(x), size, mask=self._tome_info["mask"])
+        x_attn, metric = self.attn(self.norm1(x), size, mask=self._tome_info["mask"])
+        assert isinstance(metric['metric'], (float, torch.Tensor)), "metric not a float or torch.Tensor"
         x = x + self._drop_path1(x_attn)
 
         # importance metric
-        cls_attn = attn[:, :, 0, 1:]
+        cls_attn = metric['metric'][:, :, 0, 1:]
         cls_attn = cls_attn.mean(dim=1)  # [B, N-1]
         _, idx = torch.sort(cls_attn, descending=True)
         cls_index = torch.zeros((B,1), device=idx.device).long()
