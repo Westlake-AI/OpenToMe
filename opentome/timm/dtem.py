@@ -92,14 +92,14 @@ class DTEMAttention(Attention):
         x = self.proj(x)
         x = self.proj_drop(x)
         
-        # out_dict
-        out_dict = {
-            'q': q,
-            'k': k,
-            'v': v,
-            'x': x,
-            'metric': out2}
-        return x, out_dict
+        metric = dict(
+            q = q,
+            k = k,
+            v = v,
+            x = x,
+            metric = out2
+        )
+        return x, metric
 
 
 class DTEMBlock(Block):
@@ -141,9 +141,9 @@ class DTEMBlock(Block):
             }
         return assign, out_dict
 
-    def _merge_train(self, x, size, r, n, out_dict):
+    def _merge_train(self, x, size, r, n, metric):
         # metric
-        metric = out_dict['metric']
+        metric = metric['metric']
         metric = metric / metric.norm(dim=-1, keepdim=True)
         
         # merge profile
@@ -184,8 +184,8 @@ class DTEMBlock(Block):
         size_output = torch.cat([size[:, :1], w, size[:, n:]], dim=-1)
         return x_output, size_output, n - r, _out
 
-    def _merge_eval(self, x, size, r, out_dict):    # the same to ToMe
-        metric = out_dict['metric']
+    def _merge_eval(self, x, size, r, metric):    # the same to ToMe
+        metric = metric['metric']
         metric = metric / metric.norm(dim=-1, keepdim=True)
 
         merge, _ = bipartite_soft_matching(metric,
@@ -199,8 +199,8 @@ class DTEMBlock(Block):
         x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
         return x, self._tome_info["size"], x.size(1), None
 
-    def merge(self, x, size, r, n, out_dict):
-        return self._merge_train(x, size, r, n, out_dict) if self.training else self._merge_eval(x, size, r, out_dict)
+    def merge(self, x, size, r, n, metric):
+        return self._merge_train(x, size, r, n, metric) if self.training else self._merge_eval(x, size, r, metric)
 
     def forward(self, x, size, n=None):
         if size is None or n is None:
@@ -209,16 +209,17 @@ class DTEMBlock(Block):
             x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
             return x
         else:
-            tmp, out_dict = self.attn(self.norm1(x), size=size)
+            tmp, metric = self.attn(self.norm1(x), size=size)
+            assert isinstance(metric['metric'], (float, torch.Tensor)), "metric not a float or torch.Tensor"
             x = x + self.drop_path1(self.ls1(tmp))
             # Merging
             r = self._tome_info["r"].pop(0)
             if size is not None and r > 0 and n > 0:
-                x, size, n, out_dict = self.merge(x, size, r, n, out_dict)
+                x, size, n, metric = self.merge(x, size, r, n, metric)
             # print(r, x.shape)
             x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
             
-            return x, size, n, out_dict
+            return x, size, n, metric
 
 
 def make_tome_class(transformer_class):

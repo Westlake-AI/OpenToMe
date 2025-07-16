@@ -18,7 +18,8 @@ from timm.models.vision_transformer import Attention as TimmAttention
 from timm.models.vision_transformer import Block as TimmBlock
 
 from opentome.timm import Attention, Block
-from opentome.tome.tome import crossget_bipartite_soft_matching, cross_merge_wavg, parse_r
+from opentome.tome.tome import parse_r
+from opentome.tome.crossget import crossget_bipartite_soft_matching, cross_merge_wavg
 
 
 
@@ -59,7 +60,12 @@ class CrossGetAttention(Attention):
         x = self.proj(x)
         x = self.proj_drop(x)
 
-        return x, k.mean(1), query_token
+        metric = dict(
+            metric = k.mean(1),
+            query_token = query_token
+        )
+
+        return x, metric
 
 
 class CrossGetBlock(Block):
@@ -77,17 +83,19 @@ class CrossGetBlock(Block):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         attn_size = self._tome_info["size"] if self._tome_info["prop_attn"] else None
-        x_attn, metric, query_token = self.attn(self.norm1(x), attn_size)
+        x_attn, metric = self.attn(self.norm1(x), attn_size)
+        assert isinstance(metric['metric'], (float, torch.Tensor)), "metric not a float or torch.Tensor"
+        assert isinstance(metric['query_token'], (float, torch.Tensor)), "query_token not a float or torch.Tensor"
         x = x + self._drop_path1(x_attn)
 
         r = self._tome_info["r"].pop(0)
         if r > 0:
             merge = crossget_bipartite_soft_matching(
-                metric,
+                metric['metric'],
                 r,
                 class_token=self._tome_info["class_token"],
                 distill_token=self._tome_info["distill_token"],
-                query_token,
+                query_token=metric['query_token'],
             )
             x, self._tome_info["size"] = cross_merge_wavg(merge, x, self._tome_info["size"])
         print(r, x.shape)

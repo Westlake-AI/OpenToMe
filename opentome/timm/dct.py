@@ -18,7 +18,8 @@ from timm.models.vision_transformer import VisionTransformer
 from timm.models.vision_transformer import Attention as TimmAttention
 from timm.models.vision_transformer import Block as TimmBlock
 
-from opentome.tome.tome import dc_matching, parse_r
+from opentome.tome.tome import parse_r
+from opentome.tome.dct import dc_matching
 from opentome.timm import Attention, Block
 
 try:
@@ -48,11 +49,12 @@ class DCTBlock(Block):
         x = x + self._drop_path2(self.mlp(self.norm2(x)))
         r = self._tome_info["r"].pop(0)
         if r > 0:
-            x = dc_matching(x, 
-                            r, 
-                            class_token=self._tome_info["class_token"],
-                            distill_token=self._tome_info["distill_token"],
-                        )
+            x = dc_matching(
+                    x, 
+                    r, 
+                    class_token=self._tome_info["class_token"],
+                    distill_token=self._tome_info["distill_token"],
+                )
         # print(r, x.shape)
 
         return x
