@@ -18,7 +18,17 @@ from timm.models.vision_transformer import VisionTransformer, LayerScale
 from timm.models.vision_transformer import Attention as TimmAttention
 from timm.models.vision_transformer import Block as TimmBlock
 
-from opentome.tome.tome import bipartite_soft_matching, merge_source, merge_wavg, parse_r
+# --- MODIFIED: Import the new local matching functions ---
+# NOTE: Assumes the functions from the previous step are available in this module.
+from opentome.tome.tome import (
+    bipartite_soft_matching,
+    merge_source,
+    merge_wavg,
+    parse_r,
+    # Assuming these functions were added to the tome.py file
+    naive_local_bipartite_soft_matching,
+    local_bipartite_soft_matching,
+)
 from opentome.timm import Attention, Block
 
 try:
@@ -45,7 +55,6 @@ class ToMeAttention(Attention):
         q, k, v = (
             qkv[0], qkv[1], qkv[2],
         )  # make torchscript happy (cannot use tensor as tuple)
-
         if self.fused_attn:  # pytorch flash-attn with ToMe
             x = F.scaled_dot_product_attention(q, k, v,
                 attn_mask=None if size is None else size.log()[:, None, None, :, 0],
@@ -76,6 +85,7 @@ class ToMeBlock(Block):
     Modifications:
      - Apply ToMe between the attention and mlp blocks
      - Compute and propogate token size and potentially the token sources.
+     - MODIFIED: Add logic to select between global and local merging strategies.
     """
 
     def _drop_path1(self, x):
@@ -91,20 +101,40 @@ class ToMeBlock(Block):
         assert isinstance(metric['metric'], (float, torch.Tensor)), "metric not a float or torch.Tensor"
         x = x + self._drop_path1(self.ls1(x_attn))
         r = self._tome_info["r"].pop(0)
+
         if r > 0:
-            # Apply ToMe here
-            merge, _ = bipartite_soft_matching(
-                metric['metric'],
-                r,
-                self._tome_info["class_token"],
-                self._tome_info["distill_token"],
-            )
-            if self._tome_info["trace_source"]:
-                self._tome_info["source"] = merge_source(
-                    merge, x, self._tome_info["source"]
+            # --- NEW LOGIC: Select and apply the appropriate merge function ---
+            h = self._tome_info.get("h")
+            use_naive_local = self._tome_info.get("use_naive_local", False)
+            
+            metric_val = metric['metric']
+            class_token = self._tome_info["class_token"]
+            distill_token = self._tome_info["distill_token"]
+
+            # If h is specified, use a local matching strategy
+            if h is not None and h >= 0:
+                if use_naive_local:
+                    # Use the naive (but clear) local implementation
+                    merge, _ = naive_local_bipartite_soft_matching(
+                        metric_val, r, h, class_token, distill_token
+                    )
+                else:
+                    # Use the optimized local implementation
+                    merge, _ = local_bipartite_soft_matching(
+                        metric_val, r, h, class_token, distill_token
+                    )
+            else:
+                # If h is not specified, fall back to the original global matching
+                merge, _ = bipartite_soft_matching(
+                    metric_val, r, class_token, distill_token
                 )
+            # --- END OF NEW LOGIC ---
+
+            # if self._tome_info["trace_source"]:
+            #     self._tome_info["source"] = merge_source(
+            #         merge, x, self._tome_info["source"]
+            #     )
             x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
-        # print(r, x.shape)
 
         x = x + self._drop_path2(self.ls2(self.mlp(self.norm2(x))))
         return x
@@ -114,10 +144,10 @@ def make_tome_class(transformer_class):
     class ToMeVisionTransformer(transformer_class):
         """
         Modifications:
-        - Initialize r, token size, and token sources.
+         - Initialize r, token size, and token sources.
         """
 
-        def forward(self, *args, **kwdargs) -> torch.Tensor:            
+        def forward(self, *args, **kwdargs) -> torch.Tensor:
             self._tome_info["r"] = parse_r(
                 len(self.blocks), self.r, self._tome_info["total_merge"])
             self._tome_info["size"] = None
@@ -135,22 +165,35 @@ Token Merging: Your ViT but Faster, ICLR'2023
     - code  (https://github.com/facebookresearch/ToMe)
 """
 def tome_apply_patch(
-    model: VisionTransformer, trace_source: bool = True, prop_attn: bool = True
+    model: VisionTransformer,
+    trace_source: bool = True,
+    prop_attn: bool = True,
+    h: Optional[int] = None,
+    use_naive_local: bool = False,
 ):
     """
     Applies ToMe to this transformer. Afterward, set r using model.r.
+    
+    MODIFIED to support local token merging.
 
-    If you want to know the source of each token (e.g., for visualization), set trace_source = true.
-    The sources will be available at model._tome_info["source"] afterward.
-
-    For proportional attention, set prop_attn to True. This is only necessary when evaluating models off
-    the shelf. For trianing and for evaluating MAE models off the self set this to be False.
+    Args:
+        model (VisionTransformer): The model to apply ToMe to.
+        trace_source (bool): If True, track the source of each token.
+        prop_attn (bool): If True, apply proportional attention.
+        h (Optional[int]): The locality parameter for merging. A token `a_i` can
+            only be merged with a token `b_j` if `|i - j| <= h`. If `None` or a
+            negative value, the original global merging is used.
+        use_naive_local (bool): If `h` is specified, this flag determines the
+            local merging implementation.
+            - If `False` (default), uses the memory and computationally efficient
+              `local_bipartite_soft_matching`.
+            - If `True`, uses `naive_local_bipartite_soft_matching`, which is
+              less efficient but easier to verify.
     """
     ToMeVisionTransformer = make_tome_class(model.__class__)
 
     model.__class__ = ToMeVisionTransformer
     model.r = 0
-    # model.cls_token = getattr(model, 'cls_token', None)
     model._tome_info = {
         "r": model.r,
         "size": None,
@@ -160,6 +203,9 @@ def tome_apply_patch(
         "prop_attn": prop_attn,
         "class_token": getattr(model, 'cls_token', None) is not None,
         "distill_token": getattr(model, 'dist_token', None) is not None,
+        # --- MODIFIED: Store h and the local merging flag ---
+        "h": h,
+        "use_naive_local": use_naive_local,
     }
 
     if hasattr(model, "dist_token") and model.dist_token is not None:

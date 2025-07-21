@@ -3,7 +3,9 @@ import argparse
 import os
 import pandas as pd
 from throughput.benchmark import ThroughputBenchmark
-
+import torch
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
 def main():
     parser = argparse.ArgumentParser(description="OpenToMe Throughput Benchmark Runner")
     parser.add_argument('--model-names', nargs='+', type=str, default=['deit_small_patch16_224'], help='List of timm model names.')
@@ -15,43 +17,59 @@ def main():
     parser.add_argument('--output-file', type=str, default='throughput_benchmark.csv', help='Name of the output CSV file.')
     parser.add_argument('--warmup-iters', type=int, default=10, help='Number of warmup iterations.')
     parser.add_argument('--benchmark-iters', type=int, default=50, help='Number of benchmark iterations.')
-    
-    # --- **关键改动: 添加 --verbose 开关** ---
     parser.add_argument('--verbose', action='store_true', help='启用详细模式，打印每层的Token数量（每个配置只打印一次）.')
     
+    # --- **关键改动 1: 升级 --h 参数** ---
+    parser.add_argument('--h', nargs='+', type=int, default=[None],
+                        help='一个或多个ToMe局部合并的窗口大小。如果不提供此参数，则默认进行一次全局合并测试 (h=None)。')
+    # --- END OF MODIFICATION ---
+
+    parser.add_argument('--use-naive-local', action='store_true',
+                        help='If using local merging (h is set), this flag forces the use of the naive implementation.')
+
     args = parser.parse_args()
     
     benchmark = ThroughputBenchmark()
 
     for model_name in args.model_names:
         for seq_len in args.seq_lens:
-            for algorithm in args.algorithms:
-                if algorithm == 'none':
-                    print(f"\nRunning: {model_name}, SeqLen: {seq_len}, Algorithm: none")
-                    benchmark.run(
-                        model_name=model_name,
-                        batch_size=args.batch_size,
-                        seq_len=seq_len,
-                        algorithm='none',
-                        total_merge_num=0,
-                        warmup_iters=args.warmup_iters,
-                        benchmark_iters=args.benchmark_iters,
-                        verbose=args.verbose # <-- 传递 verbose 参数
-                    )
-                else:
-                    for target_ratio in args.target_ratios:
-                        total_merge_num = int(target_ratio * seq_len)
-                        print(f"\nRunning: {model_name}, SeqLen: {seq_len}, Algorithm: {algorithm}, TargetRatio: {target_ratio} -> TotalMerge: {total_merge_num}")
+            # --- **关键改动 2: 添加h值的循环** ---
+            for h_value in args.h:
+                for algorithm in args.algorithms:
+                    if algorithm == 'none':
+                        # "none" 算法与h无关，为避免重复运行，只在h_value是默认值时运行一次
+                        if h_value is not args.h[0]:
+                            continue
+                        print(f"\nRunning: {model_name}, SeqLen: {seq_len}, Algorithm: none")
                         benchmark.run(
                             model_name=model_name,
                             batch_size=args.batch_size,
                             seq_len=seq_len,
-                            algorithm=algorithm,
-                            total_merge_num=total_merge_num,
+                            algorithm='none',
+                            total_merge_num=0,
                             warmup_iters=args.warmup_iters,
                             benchmark_iters=args.benchmark_iters,
-                            verbose=args.verbose # <-- 传递 verbose 参数
+                            verbose=args.verbose
                         )
+                    else:
+                        for target_ratio in args.target_ratios:
+                            total_merge_num = int(target_ratio * seq_len)
+                            # 在打印信息中加入当前的h值
+                            h_info = f"h={h_value}" if h_value is not None else "Global"
+                            print(f"\nRunning: {model_name}, SeqLen: {seq_len}, Algorithm: {algorithm}, TargetRatio: {target_ratio} -> TotalMerge: {total_merge_num}, Merging: {h_info}")
+                            benchmark.run(
+                                model_name=model_name,
+                                batch_size=args.batch_size,
+                                seq_len=seq_len,
+                                algorithm=algorithm,
+                                total_merge_num=total_merge_num,
+                                warmup_iters=args.warmup_iters,
+                                benchmark_iters=args.benchmark_iters,
+                                verbose=args.verbose,
+                                h=h_value, # 传递当前的h值
+                                use_naive_local=args.use_naive_local
+                            )
+            # --- END OF MODIFICATION ---
 
     results_df = benchmark.get_results()
     os.makedirs(args.output_dir, exist_ok=True)
