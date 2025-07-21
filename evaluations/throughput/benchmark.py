@@ -5,10 +5,12 @@ import timm
 import pandas as pd
 import numpy as np
 import math
+from typing import Optional # <--- MODIFIED: Added for type hinting
 
 # 添加必要的 import
 from opentome.tome import tome as tm
 from evaluations.utils.timer import Timer
+# --- MODIFIED: Ensure tome_apply_patch is the updated version from the previous step ---
 from opentome.timm import (
     tome_apply_patch,
     dtem_apply_patch,
@@ -33,8 +35,19 @@ class ThroughputBenchmark:
         self.dtype = dtype
         self.results = []
 
-    # 签名中包含 total_merge_num 和 inflect，默认值与您的示例一致
-    def run(self, model_name: str, batch_size: int, seq_len: int, algorithm: str, total_merge_num: int, warmup_iters: int, benchmark_iters: int, inflect: float = -0.5, verbose: bool = False):
+    # --- MODIFIED: Added h and use_naive_local to the method signature ---
+    def run(self,
+            model_name: str,
+            batch_size: int,
+            seq_len: int,
+            algorithm: str,
+            total_merge_num: int,
+            warmup_iters: int,
+            benchmark_iters: int,
+            inflect: float = -0.5,
+            h: Optional[int] = None, # The locality window size
+            use_naive_local: bool = False, # Flag to use the naive implementation
+            verbose: bool = False):
         if algorithm not in ALGO_MAP:
             print(f"警告：找不到算法 '{algorithm}'，将跳过。")
             return
@@ -48,27 +61,32 @@ class ThroughputBenchmark:
             img_size = int(math.sqrt(seq_len)) * patch_size
             model = timm.create_model(model_name, img_size=img_size, pretrained=False).to(self.device).eval()
 
+            # --- MODIFIED: Dynamically build arguments for the patch function ---
             # 2. 应用补丁
             patch_function = ALGO_MAP[algorithm]
-            if algorithm in ["tome", "pitome", "dtem"]: # 根据示例，为这些算法启用 trace_source
-                patch_function(model, trace_source=True)
-            else:
-                patch_function(model)
+            patch_kwargs = {}
+            if algorithm in ["tome", "pitome", "dtem"]:
+                patch_kwargs['trace_source'] = True
 
-            # --- **↓↓↓ 严格遵循您提供的权威代码逻辑 ↓↓↓** ---
+            # Add local merging parameters ONLY for the 'tome' algorithm
+            if algorithm == "tome":
+                patch_kwargs['h'] = h
+                patch_kwargs['use_naive_local'] = use_naive_local
+                patch_kwargs['prop_attn'] = False 
+            
+            patch_function(model, **patch_kwargs)
+            # --- END OF MODIFICATION ---
+
             # 3. 根据算法配置模型
             if total_merge_num > 0 and algorithm != "none":
                 if not hasattr(model, '_tome_info'):
-                     raise ValueError(f"模型 {model_name} 在打补丁后没有找到 _tome_info 属性。")
+                        raise ValueError(f"模型 {model_name} 在打补丁后没有找到 _tome_info 属性。")
 
                 num_blocks = len(model.blocks)
 
                 if algorithm in ["tome", "pitome", "dtem"]:
-                    # a. 复现您代码中的逻辑：从 num 计算出 ratio
-                    #    注意：这里的 seq_len 是图像token的数量，与 (H/P)*(W/P) 一致
                     merge_ratio_calculated = tm.check_parse_r(num_blocks, total_merge_num, seq_len, inflect)
                     
-                    # b. 严格按照您的示例，设定所有相关的模型属性
                     r_tuple = (merge_ratio_calculated, inflect)
                     model.r = r_tuple
                     model._tome_info["r"] = model.r
@@ -78,18 +96,24 @@ class ThroughputBenchmark:
                     print(f"    - 目标总合并数: {total_merge_num}")
                     print(f"    - 计算出的 ratio: {merge_ratio_calculated:.4f}")
                     print(f"    - 设置的配置元组 _tome_info['r']: {model._tome_info['r']}")
+                    
+                    # --- MODIFIED: Add logging for local merging parameters ---
+                    if algorithm == "tome":
+                        if h is not None and h >= 0:
+                            print(f"    - Local Merging: Enabled (h={h}, naive={use_naive_local})")
+                        else:
+                            print(f"    - Local Merging: Disabled (Global)")
+                    # --- END OF MODIFICATION ---
 
                 elif algorithm == "diffrate":
                     avg_merges_per_layer = total_merge_num / num_blocks
                     model.init_kept_num_using_r(int(avg_merges_per_layer))
                     print(f"  [最终配置] 算法 'diffrate' 配置成功: 平均每层合并 {avg_merges_per_layer:.2f} 个Token")
-            # --- **↑↑↑ 修正部分结束 ↑↑↑** ---
-            
-            # ... 后续代码部分与上一版逻辑相同，为了简洁此处折叠 ...
+
             # 4. 创建输入数据
             x = torch.randn(batch_size, 3, img_size, img_size, device=self.device, dtype=self.dtype)
 
-            # 5. 详细模式验证
+            # 5. 详细模式验证 (Verbose mode)
             if verbose:
                 if hasattr(model, 'blocks'):
                     print("\n" + "="*50)
@@ -134,11 +158,16 @@ class ThroughputBenchmark:
             print(f"错误: model={model_name}, algo={algorithm}, total_merge={total_merge_num} 失败. Error: {e}")
             latency_ms = np.nan; throughput_samples_per_sec = np.nan; peak_mem_mb = np.nan; status = 'failed'
         
+        # --- MODIFIED: Add local merging params to the results dictionary ---
         self.results.append({
             'model_name': model_name, 'algorithm': algorithm, 'batch_size': batch_size,
-            'seq_len': seq_len, 'target_total_merge': total_merge_num, 'latency_ms': latency_ms,
-            'throughput_samples/s': throughput_samples_per_sec, 'peak_mem_mb': peak_mem_mb, 'status': status
+            'seq_len': seq_len, 'target_total_merge': total_merge_num,
+            'h': h if algorithm == 'tome' else np.nan, # Record h only for tome
+            'use_naive_local': use_naive_local if algorithm == 'tome' and h is not None else np.nan,
+            'latency_ms': latency_ms, 'throughput_samples/s': throughput_samples_per_sec,
+            'peak_mem_mb': peak_mem_mb, 'status': status
         })
+        # --- END OF MODIFICATION ---
 
     def get_results(self):
         return pd.DataFrame(self.results)

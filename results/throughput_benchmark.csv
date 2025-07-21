@@ -1,0 +1,2 @@
+model_name,algorithm,batch_size,seq_len,target_total_merge,h,latency_ms,throughput_samples/s,peak_mem_mb,status
+deit_small_patch16_224,tome,1,196,98,4,,,,failed
