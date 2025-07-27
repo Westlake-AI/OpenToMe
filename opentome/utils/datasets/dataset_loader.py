@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 
 
-def create_dataset(dataset_path, batch_size=32, num_workers=4, input_size=224, mean=None, std=None):
+def create_dataset(dataset_path, batch_size=32, num_workers=4, input_size=224, mean=None, std=None, return_dataset_only=False):
     """
     Create a DataLoader for the ImageNet dataset.
     Args:
@@ -32,6 +32,9 @@ def create_dataset(dataset_path, batch_size=32, num_workers=4, input_size=224, m
     )
     if not val_dataset:
         raise ValueError(f"No data found in {os.path.join(dataset_path)}")
+    # If you use distributed evaluation, you need to return a dataset, instead of dataloader.
+    if return_dataset_only:
+        return val_dataset
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
