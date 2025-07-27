@@ -18,6 +18,10 @@ import random
 from typing import List, Tuple
 import numpy as np
 import torch.nn.functional as F
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+
+torch.backends.cudnn.benchmark = True
 
 try:
     from scipy.ndimage import binary_erosion
@@ -86,7 +90,7 @@ def make_visualization(
 
 
 def vis_eval(model, work_dir, args):
-    input_size = model.default_cfg["input_size"][1]
+    input_size = model.module.default_cfg["input_size"][1]
 
     # Make sure the transform is correct for your model!
     transform_list = [
@@ -97,7 +101,7 @@ def vis_eval(model, work_dir, args):
     transform_vis  = transforms.Compose(transform_list)
     transform_norm = transforms.Compose(transform_list + [
         transforms.ToTensor(),
-        transforms.Normalize(model.default_cfg["mean"], model.default_cfg["std"]),
+        transforms.Normalize(model.module.default_cfg["mean"], model.module.default_cfg["std"]),
     ])
     
     img = Image.open("./demo/n02510455_205.jpeg")
@@ -133,7 +137,7 @@ def parse_args():
     parser.add_argument('--launcher', choices=['none', 'slurm', 'pytorch'], default='none', help='job launcher')
     parser.add_argument('--local_rank', help='set local_rank for torch.distributed.launch (torch<2.0.0)', type=int, default=0)
     parser.add_argument('--local-rank', type=int, default=0)
-    parser.add_argument('--port', type=int, default=29500, help='port only works when launcher=="slurm"')
+    parser.add_argument('--port', type=int, default=29501, help='port only works when launcher=="slurm"')
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
@@ -149,14 +153,40 @@ def main():
         work_dir = osp.join(args.work_dir, 'eval_{}_by_{}'.format(args.model_name, args.tome))
     os.makedirs(work_dir, exist_ok=True)
 
+    # distributed evaluation
+    args.distributed = False
+    if 'WORLD_SIZE' in os.environ:
+        args.distributed = int(os.environ['WORLD_SIZE']) >= 1
+    args.device = 'cuda:0'
+    args.world_size = 1
+    args.rank = 0  # global rank
+    if args.distributed:
+        args.device = 'cuda:%d' % args.local_rank
+        torch.cuda.set_device(args.local_rank)
+        torch.distributed.init_process_group(backend='nccl', init_method='env://')
+        args.world_size = torch.distributed.get_world_size()
+        args.rank = torch.distributed.get_rank()
+    else:
+        raise ValueError('Evaulation with a single process on 1 GPUs.')
+    assert args.rank >= 0
+
     # build the model
     model = timm.create_model(args.model_name, pretrained=True)
     if model == None:
         raise ValueError(f"Model '{args.model_name}' could not be created.")
+    if args.local_rank == 0:
+        print(f'Model {args.model_name} loaded successfully., param count:{sum([m.numel() for m in model.parameters()])}')
+
+    # setup distributed training
+    model = model.to(args.device)
+    if args.distributed:
+        if args.local_rank == 0:
+            print("Using native Torch DistributedDataParallel.")
+        model = DDP(model, device_ids=[args.local_rank])
 
     assert args.merge_num >= 0, "Please specify a positive merge number."
     assert args.inflect in [-0.5, 1, 2], "Please specify a valid inflect value."
-    if args.tome in ['tome', 'tofu', 'crossget', 'dct', "pitome"]:
+    if args.tome.lower() in ['tome', 'tofu', 'crossget', 'dct', "pitome"]:
         if args.tome == 'tome':
             tome.tome_apply_patch(model, trace_source=True)
         elif args.tome == 'tofu':
@@ -170,23 +200,23 @@ def main():
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support ToMe/ToFu/CrossGET. Please use a model that supports ToMe.")
         if args.merge_ratio is not None and args.merge_num is None:
-            args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, args.inflect)))
+            args.merge_num = sum(tm.parse_r(len(model.module.blocks), r=(args.merge_ratio, args.inflect)))
         elif args.merge_ratio is None and args.merge_num is not None:
-            merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
-                                    (model.default_cfg["input_size"][1]/args.patch_size) ** 2, args.inflect)
+            merge_ratio = tm.check_parse_r(len(model.module.blocks), args.merge_num, 
+                                    (model.module.default_cfg["input_size"][1] / args.patch_size) ** 2, args.inflect)
         # update _tome_info
         model.r = (merge_ratio, args.inflect)
         model._tome_info["r"] = model.r
         model._tome_info["total_merge"] = args.merge_num
-    elif args.tome == 'dtem':
+    elif args.tome.lower() == 'dtem':
         dtem.dtem_apply_patch(model, feat_dim=None)  # exteranal feature dim, defalut: none
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support DTEM. Please use a model that supports DTEM.")
         if args.merge_ratio is not None and args.merge_num is None:
-            args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, args.inflect)))
+            args.merge_num = sum(tm.parse_r(len(model.module.blocks), r=(args.merge_ratio, args.inflect)))
         elif args.merge_ratio is None and args.merge_num is not None:
-            merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
-                                    (model.default_cfg["input_size"][1]/args.patch_size) ** 2, args.inflect)
+            merge_ratio = tm.check_parse_r(len(model.module.blocks), args.merge_num, 
+                                    (model.module.default_cfg["input_size"][1] / args.patch_size) ** 2, args.inflect)
         # update _tome_info
         model.r = (merge_ratio, args.inflect)
         model._tome_info["r"] = model.r
@@ -194,21 +224,21 @@ def main():
         model._tome_info["tau1"] = 0.1
         model._tome_info["tau2"] = 0.1
         model._tome_info["total_merge"] = args.merge_num
-    elif args.tome == 'diffrate':
+    elif args.tome.lower() == 'diffrate':
         diffrate.diffrate_apply_patch(model, prune_granularity=4, merge_granularity=4)
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support DiffRate. Please use a model that supports DiffRate.")
-        r = args.merge_num / len(model.blocks) if args.merge_num is not None else 0
+        r = args.merge_num / len(model.module.blocks) if args.merge_num is not None else 0
         model.init_kept_num_using_r(int(r))
-    elif args.tome == 'mctf':
+    elif args.tome.lower() == 'mctf':
         mctf.mctf_apply_patch(model)
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support MCTF. Please use a model that supports MCTF.")
         if args.merge_ratio is not None and args.merge_num is None:
-            args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, args.inflect)))
+            args.merge_num = sum(tm.parse_r(len(model.module.blocks), r=(args.merge_ratio, args.inflect)))
         elif args.merge_ratio is None and args.merge_num is not None:
-            merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
-                                    (model.default_cfg["input_size"][1]/args.patch_size) ** 2, args.inflect)
+            merge_ratio = tm.check_parse_r(len(model.module.blocks), args.merge_num, 
+                                    (model.module.default_cfg["input_size"][1] / args.patch_size) ** 2, args.inflect)
         # update _tome_info
         model.r = (merge_ratio, args.inflect)
         model._tome_info["r"] = model.r
@@ -219,7 +249,7 @@ def main():
         model._tome_info["tau_size"] = 40
         model._tome_info["bidirection"] = True
         model._tome_info["pooling_type"] = 'none'
-    elif args.tome == 'none':
+    elif args.tome.lower() == 'none':
         pass
     else:
         raise ValueError("Invalid ToMe implementation specified. Use 'tome' or 'none'.")
