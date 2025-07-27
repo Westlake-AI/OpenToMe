@@ -116,12 +116,12 @@ def make_tome_class(transformer_class):
         """
 
         def forward(self, *args, **kwdargs) -> torch.Tensor:
-            # self._tome_info["r"] = [self.ratio] * len(self.blocks) 
-            # self._tome_info["use_bsm_pitome"] = [False] * (len(self.blocks)//2) + [True] * (len(self.blocks)//2)
+            # self._tome_info["r"] = [self.ratio] * len(self.module.blockss) 
+            # self._tome_info["use_bsm_pitome"] = [False] * (len(self.module.blockss)//2) + [True] * (len(self.module.blockss)//2)
             self._tome_info["r"] = parse_r(
-                len(self.blocks), self.r, self._tome_info["total_merge"])
-            num_bsm_layers = math.ceil(len(self.blocks) * 0.5) 
-            self._tome_info["use_bsm_pitome"] = [True] * (num_bsm_layers) + [False] * (len(self.blocks) - num_bsm_layers)
+                len(self.module.blockss), self.r, self._tome_info["total_merge"])
+            num_bsm_layers = math.ceil(len(self.module.blockss) * 0.5) 
+            self._tome_info["use_bsm_pitome"] = [True] * (num_bsm_layers) + [False] * (len(self.module.blockss) - num_bsm_layers)
             self._tome_info["size"] = None
             self._tome_info["source"] = None
 
@@ -149,16 +149,16 @@ def pitome_apply_patch(
         "total_merge": None,
         "trace_source": trace_source,
         "prop_attn": prop_attn,
-        "class_token": getattr(model, 'cls_token', None) is not None,
-        "distill_token": getattr(model, 'dist_token', None) is not None,
+        "class_token": getattr(model.module, 'cls_token', None) is not None,
+        "distill_token": getattr(model.module, 'dist_token', None) is not None,
         # PiToMe hyperparameters
         "margin": [],
 
     }
 
-    margins = [.75 - .75 * (i / len(model.blocks)) for i in range(len(model.blocks))]
+    margins = [.75 - .75 * (i / len(model.module.blocks)) for i in range(len(model.module.blocks))]
     i = 0
-    if hasattr(model, "dist_token") and model.dist_token is not None:
+    if hasattr(model.module, "dist_token") and model.module.dist_token is not None:
         model._tome_info["distill_token"] = True
 
     for module in model.modules():

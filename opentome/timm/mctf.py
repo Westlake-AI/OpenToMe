@@ -142,7 +142,7 @@ def make_tome_class(transformer_class):
 
         def forward(self, *args, **kwdargs) -> torch.Tensor:            
             self._tome_info["r"] = parse_r(
-                len(self.blocks), self.r, self._tome_info["total_merge"])
+                len(self.module.blockss), self.r, self._tome_info["total_merge"])
             self._tome_info["size"] = None
             self._tome_info["source"] = None
 
@@ -181,8 +181,8 @@ def mctf_apply_patch(
         "total_merge": None,
         "trace_source": trace_source,
         "prop_attn": prop_attn,
-        "class_token": getattr(model, 'cls_token', None) is not None,
-        "distill_token": getattr(model, 'dist_token', None) is not None,
+        "class_token": getattr(model.module, 'cls_token', None) is not None,
+        "distill_token": getattr(model.module, 'dist_token', None) is not None,
         # MCFT hyperparameters
         "one_step_ahead": 1,
         "tau_sim": 1,
@@ -193,7 +193,7 @@ def mctf_apply_patch(
         "return_attn": True,    # TODO need to support k.mean(1) as the metric, not only attention
     }
 
-    if hasattr(model, "dist_token") and model.dist_token is not None:
+    if hasattr(model.module, "dist_token") and model.module.dist_token is not None:
         model._tome_info["distill_token"] = True
 
     for module in model.modules():
