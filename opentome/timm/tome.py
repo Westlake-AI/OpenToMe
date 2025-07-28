@@ -131,7 +131,7 @@ class ToMeBlock(Block):
             # --- END OF NEW LOGIC ---
 
             if self._tome_info["trace_source"]:
-                self._tome_info["source"] = merge_source(cmerge, x, self._tome_info["source"])
+                self._tome_info["source"] = merge_source(merge, x, self._tome_info["source"])
             x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
 
         x = x + self._drop_path2(self.ls2(self.mlp(self.norm2(x))))
@@ -214,8 +214,4 @@ def tome_apply_patch(
             module.__class__ = ToMeBlock
             module._tome_info = model._tome_info
         elif isinstance(module, (Attention, TimmAttention)):
-            module.__class__ = ToMeAttention
-
-    # print(model)
-    # print(model._tome_info)
-    # raise ValueError("bugs")
+            module.__class__ = ToMeAttentionz
