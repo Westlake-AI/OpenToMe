@@ -5,7 +5,7 @@ import time
 import timm
 import torch
 import torch.distributed as dist
-from timm.utils import AverageMeter
+from timm.utils import AverageMeter, reduce_tensor
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
 from opentome.timm import tome, dtem, diffrate, tofu, mctf, crossget, dct, pitome
@@ -49,13 +49,6 @@ def cleanup():
     dist.destroy_process_group()
 
 
-def reduce_tensor(tensor, world_size):
-    rt = tensor.clone()
-    dist.all_reduce(rt, op=dist.ReduceOp.SUM)
-    rt *= world_size
-    return rt
-
-
 def evaluation(args):
 
     args = parse_args()
@@ -79,7 +72,6 @@ def evaluation(args):
         datefmt='%Y-%m-%d %H:%M:%S'
     )
     logger = logging.getLogger()
-    logger.info('Start evaluation with args: {}'.format(args))
 
     # distributed evaluation
     args.distributed = False
@@ -142,6 +134,7 @@ def evaluation(args):
     )
 
     # Evaluation
+    logger.info('Start evaluation with args: {}'.format(args))
     for merge_num in merge_list:
         assert merge_num >= 0, "Please specify a positive merge number."
         assert args.inflect in [-0.5, 1, 2], "Please specify a valid inflect value."
