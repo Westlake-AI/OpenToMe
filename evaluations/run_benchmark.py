@@ -13,6 +13,7 @@ def main():
     parser.add_argument('--model-names', nargs='+', type=str, default=['deit_small_patch16_224'], help='List of timm model names.')
     parser.add_argument('--batch-size', type=int, default=16, help='Batch size for the benchmark.')
     parser.add_argument('--seq-lens', nargs='+', type=int, default=[196], help='List of sequence lengths (number of patches).')
+    parser.add_argument('--algorithms', nargs='+', type=str, default=['tome', 'pitome'], help='List of algorithms to test. "none" is the baseline.')
     parser.add_argument('--target-ratios', nargs='+', type=float, default=[0.25, 0.5], help='Target merge ratios to test (e.g., 0.5 to merge 50%% of total tokens).')
     parser.add_argument('--output-dir', type=str, default='results', help='Directory to save the benchmark results.')
     parser.add_argument('--output-file', type=str, default='throughput_benchmark.csv', help='Name of the output CSV file.')
@@ -42,56 +43,54 @@ def main():
 
     for model_name in args.model_names:
         for seq_len in args.seq_lens:
-            for variant in args.tome_variants:
-                if variant == 'none':
-                    # --- Run baseline (no merging) ---
-                    print(f"\nRunning: {model_name}, SeqLen: {seq_len}, Variant: none")
-                    benchmark.run(
-                        variant_name='none',
-                        model_name=model_name,
-                        batch_size=args.batch_size,
-                        seq_len=seq_len,
-                        algorithm='none',
-                        total_merge_num=0,
-                        warmup_iters=args.warmup_iters,
-                        benchmark_iters=args.benchmark_iters,
-                        verbose=args.verbose
-                    )
-                else:
-                    # --- Run ToMe variants ---
-                    use_naive = 'naive' in variant
-                    
-                    # --- ✅ KEY MODIFICATION 2: Dynamically calculate h ---
-                    # Calculate the integer h value based on the ratio and current sequence length.
-                    # This calculation is only relevant for local variants.
-                    h_val = None
-                    if 'local' in variant:
-                        h_val = int(args.local_h_ratio * seq_len)
-                        # Ensure h is at least 1 for valid windowing
-                        if h_val < 1:
-                            h_val = 1
-                    # --- END OF MODIFICATION ---
-                    
-                    for target_ratio in args.target_ratios:
-                        for source_mode in args.source_tracking_modes:
-                            total_merge_num = int(target_ratio * seq_len)
-                            
-                            print(f"\nRunning: {model_name}, SeqLen: {seq_len}, Variant: {variant}, TargetRatio: {target_ratio}, SourceMode: {source_mode}")
+            for algorithm in args.algorithms:
+                if algorithm=='tome':
+                    for variant in args.tome_variants:
+                        if variant == 'none':
+                            # --- Run baseline (no merging) ---
+                            print(f"\nRunning: {model_name}, SeqLen: {seq_len}, Variant: none")
                             benchmark.run(
-                                variant_name=variant,
+                                variant_name='none',
                                 model_name=model_name,
                                 batch_size=args.batch_size,
                                 seq_len=seq_len,
-                                algorithm='tome',
-                                total_merge_num=total_merge_num,
+                                algorithm='none',
+                                total_merge_num=0,
                                 warmup_iters=args.warmup_iters,
                                 benchmark_iters=args.benchmark_iters,
-                                verbose=args.verbose,
-                                h=h_val, # Pass the calculated integer h_val
-                                use_naive_local=use_naive,
-                                source_tracking_mode=source_mode,
-                                verify_unmerge=args.verify_unmerge
+                                verbose=args.verbose
                             )
+                        else:
+                            # --- Run ToMe variants ---
+                            use_naive = 'naive' in variant
+                            h_val = None
+                            if 'local' in variant:
+                                h_val = int(args.local_h_ratio * seq_len)
+                                if h_val < 1:
+                                    h_val = 1
+                            
+                            for target_ratio in args.target_ratios:
+                                for source_mode in args.source_tracking_modes:
+                                    total_merge_num = int(target_ratio * seq_len)
+                                    
+                                    print(f"\nRunning: {model_name}, SeqLen: {seq_len}, Variant: {variant}, TargetRatio: {target_ratio}, SourceMode: {source_mode}")
+                                    benchmark.run(
+                                        variant_name=variant,
+                                        model_name=model_name,
+                                        batch_size=args.batch_size,
+                                        seq_len=seq_len,
+                                        algorithm=algorithm,
+                                        total_merge_num=total_merge_num,
+                                        warmup_iters=args.warmup_iters,
+                                        benchmark_iters=args.benchmark_iters,
+                                        verbose=args.verbose,
+                                        h=h_val, # Pass the calculated integer h_val
+                                        use_naive_local=use_naive,
+                                        source_tracking_mode=source_mode,
+                                        verify_unmerge=args.verify_unmerge
+                                    )
+                else:
+                    print(f"We haven't complete the check of algorithm {algorithm}")
 
     results_df = benchmark.get_results()
     os.makedirs(args.output_dir, exist_ok=True)
