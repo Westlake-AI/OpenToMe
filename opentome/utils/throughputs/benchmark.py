@@ -37,7 +37,7 @@ class Timer:
         return self
 
     def __str__(self):
-        return (
+        return ( 
             f"{self.label:<10} {self.sub_label:<40} {self.description:<10} "
             f"mean: {self.mean*1000:.3f} ms, std: {self.std*1000:.3f} ms"
         )

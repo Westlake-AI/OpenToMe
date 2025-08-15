@@ -100,6 +100,7 @@ class ThroughputBenchmark:
                     def pre_hook(module, inputs):
                         print(f"  - 输入到 Block {block_index:02d}: {inputs[0].shape[1]} tokens")
                     return pre_hook
+                    
                 for i, block in enumerate(model.blocks):
                     handles.append(block.register_forward_pre_hook(create_pre_hook(i)))
                 with torch.no_grad(), torch.autocast(device_type='cuda', dtype=self.dtype):
