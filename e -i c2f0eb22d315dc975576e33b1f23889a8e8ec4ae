@@ -1,0 +1,209 @@
+[33mcommit e204d6a496a9d69a796a455ba1d8ba2852b9f651[m[33m ([m[1;36mHEAD -> [m[1;32mmerge_source_map[m[33m, [m[1;31morigin/merge_source_map[m[33m)[m
+Author: yukai2007 <yu.kai.2007.2.23@gmail.com>
+Date:   Fri Aug 15 14:46:13 2025 +0800
+
+    merge_source_map
+
+[33mcommit 5ac45d85a4b3e9885cf0d6092903ef793ec577b9[m
+Author: GT-Kai <2975177159@qq.com>
+Date:   Fri Aug 15 14:18:37 2025 +0800
+
+    The completion of map-type source merging at normal ToMe.
+
+[33mcommit c2f0eb22d315dc975576e33b1f23889a8e8ec4ae[m
+Author: GT-Kai <2975177159@qq.com>
+Date:   Fri Aug 15 13:46:27 2025 +0800
+
+    The completion of map-type source merging at normal ToMe.
+
+[33mcommit 12780be6c6e258fd75dbb277921dfd51885a25b2[m[33m ([m[1;31morigin/master[m[33m, [m[1;31morigin/HEAD[m[33m, [m[1;32mmaster[m[33m)[m
+Author: Xin Jin <124172716+JinXins@users.noreply.github.com>
+Date:   Mon Jul 28 16:29:51 2025 +0800
+
+    Update README.md
+
+[33mcommit 4512a9bf34c4a59330555222a0f5b2f07733b0b3[m
+Merge: ff8c05f 802b4b0
+Author: Xin Jin <124172716+JinXins@users.noreply.github.com>
+Date:   Mon Jul 28 16:28:23 2025 +0800
+
+    Merge pull request #6 from JinXins/master
+    
+    fixs bug
+
+[33mcommit 802b4b035666dedb2ee85ab05ccbd17a72063681[m
+Author: JinXins <158398730@qq.com>
+Date:   Mon Jul 28 08:24:51 2025 +0000
+
+    fixs bug
+
+[33mcommit ff8c05f3ac7dd1971794dd5b0b2a1ddac14b97f1[m
+Merge: 046c21f 92ae742
+Author: Xin Jin <124172716+JinXins@users.noreply.github.com>
+Date:   Mon Jul 28 05:38:04 2025 +0800
+
+    Merge pull request #5 from JinXins/master
+    
+    Thanks (anyway, it's myself. lol :>)
+
+[33mcommit 92ae7422a7ace8a79a4f8f4b5612f97d8f72a469[m
+Author: JinXins <158398730@qq.com>
+Date:   Sun Jul 27 21:21:06 2025 +0000
+
+    support distribution evaulation
+
+[33mcommit 046c21fc1c694ba05b8f3e1fa61d675aa9fd21b0[m
+Author: yukai2007 <yu.kai.2007.2.23@gmail.com>
+Date:   Mon Jul 21 15:34:40 2025 +0000
+
+    feat: add .gitignore to ignore local check script
+
+[33mcommit c1b515f3ff79f9ee03a640f968bd1cb6fa938071[m
+Author: yukai2007 <yu.kai.2007.2.23@gmail.com>
+Date:   Mon Jul 21 07:49:30 2025 +0000
+
+    LocalToMe
+
+[33mcommit 1087239a9394ecdded2d46032030d0d3300caa50[m
+Merge: ecba89a 603d2ed
+Author: Xin Jin <124172716+JinXins@users.noreply.github.com>
+Date:   Thu Jul 17 00:01:50 2025 +0800
+
+    Merge pull request #4 from JinXins/master
+    
+    Update some key function for evaluation
+
+[33mcommit 603d2edfc401da1f011c154cf7f0bd461e6b1ff0[m
+Author: JinXins <158398730@qq.com>
+Date:   Wed Jul 16 23:57:10 2025 +0800
+
+    updates
+
+[33mcommit ecba89af5d05bfe993f4ffa7ac33bcc6c5766ec8[m
+Author: WayneJin0918 <wayneyjin@gmail.com>
+Date:   Tue Jul 15 19:18:40 2025 +0000
+
+    update formulate meters
+
+[33mcommit 0b5603e988e81565c96a58c8f40531d894fa9e97[m
+Merge: 5a148ae 552c29c
+Author: Siyuan Li <1070535169@qq.com>
+Date:   Tue Jul 15 20:20:28 2025 +0800
+
+    Merge pull request #3 from yukai2007/master
+    
+    feat: 添加 benchmark 评测脚本和工具类
+
+[33mcommit 552c29c5bd11c0bf4e2abb2cffb2de95a786e3c9[m
+Author: WayneJin0918 <wayneyjin@gmail.com>
+Date:   Tue Jul 15 11:58:26 2025 +0000
+
+    feat: 添加 benchmark 评测脚本和工具类
+
+[33mcommit 5a148ae5a49498569ac1232dfee5ee3fdde9558f[m
+Merge: 579334c 3190081
+Author: Xin Jin <124172716+JinXins@users.noreply.github.com>
+Date:   Sun Jun 29 22:26:30 2025 +0800
+
+    Merge pull request #2 from JinXins/master
+    
+    Update PiToMe & Support ToMe Visualization
+
+[33mcommit 319008142a34a0a9cd1b7badda5b581ca899e247[m
+Author: JinXins <158398730@qq.com>
+Date:   Sun Jun 29 22:24:35 2025 +0800
+
+    support ToMe visualization
+
+[33mcommit a367675e310ea95dcb1e829ad47682ec14533d9f[m
+Author: JinXins <158398730@qq.com>
+Date:   Sun Jun 29 22:20:12 2025 +0800
+
+    update
+
+[33mcommit d8a3870ab3c93dc2bf1b1cebcfc83264a03639ca[m
+Author: JinXins <158398730@qq.com>
+Date:   Sun Jun 29 21:54:18 2025 +0800
+
+    support ToMe visualization
+
+[33mcommit 593713e9a04764d5fa14bc7d48bac2a2d9c18b7e[m
+Author: JinXins <158398730@qq.com>
+Date:   Sun Jun 29 20:34:16 2025 +0800
+
+    fix bugs
+
+[33mcommit 8ba817d66ff8e966ef6af457fbc35f3035887e83[m
+Author: JinXins <158398730@qq.com>
+Date:   Sun Jun 29 20:30:36 2025 +0800
+
+    add PiToME
+
+[33mcommit 565f0c3b3829e5407a8b5ff1a1c831d3f8020b95[m
+Author: JinXins <158398730@qq.com>
+Date:   Fri Jun 27 22:07:39 2025 +0800
+
+    fix
+
+[33mcommit 50d55718841e4ac34a094a27d01407afd3141ea2[m
+Author: JinXins <158398730@qq.com>
+Date:   Fri Jun 27 22:07:17 2025 +0800
+
+    fix
+
+[33mcommit d7ae188617eb8196008a30935c559762c7dcdeaa[m
+Author: JinXins <158398730@qq.com>
+Date:   Fri Jun 27 22:02:59 2025 +0800
+
+    fix
+
+[33mcommit 823c3feeb409f51e502142f0b9e5da0673c2d802[m
+Author: JinXins <158398730@qq.com>
+Date:   Fri Jun 27 21:51:24 2025 +0800
+
+    fix
+
+[33mcommit 6d10560986e743cc6e27c221fcb7e52a6622382c[m
+Author: JinXins <158398730@qq.com>
+Date:   Fri Jun 27 21:36:36 2025 +0800
+
+    update DCT
+
+[33mcommit 579334cdc9cb653900060f42df7f3a33924f64c2[m
+Author: Lupin1998 <1070535169@qq.com>
+Date:   Thu Jun 26 23:55:38 2025 +0100
+
+    fix
+
+[33mcommit 7e82811e66fbd3305442859ed75869b5ea484fdf[m
+Author: Xin Jin <124172716+JinXins@users.noreply.github.com>
+Date:   Fri Jun 27 01:45:09 2025 +0800
+
+    Update in1k_example.py
+
+[33mcommit a536a8abc13d77da1272f70a0ddd3bb3b041d435[m
+Merge: 61bd4bd 0a75b27
+Author: Xin Jin <124172716+JinXins@users.noreply.github.com>
+Date:   Fri Jun 27 01:41:23 2025 +0800
+
+    Merge pull request #1 from JinXins/master
+    
+    update methods
+
+[33mcommit 0a75b273912d3f232a6d49c4f8f17f1809653e7e[m
+Author: JinXins <158398730@qq.com>
+Date:   Thu Jun 26 23:24:21 2025 +0800
+
+    update new tome codes
+
+[33mcommit 61bd4bd4711bf1bfc99e738a95fc97bd1717e4cf[m
+Author: Xin Jin <124172716+JinXins@users.noreply.github.com>
+Date:   Thu Jun 26 02:17:10 2025 +0800
+
+    Update README.md
+
+[33mcommit 3c5dc21979195050590be32cb45fd4f3dedc19fe[m
+Author: Lupin1998 <1070535169@qq.com>
+Date:   Sun Jun 22 16:36:00 2025 -1000
+
+    init
