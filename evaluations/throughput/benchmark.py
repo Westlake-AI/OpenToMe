@@ -91,7 +91,23 @@ class ThroughputBenchmark:
         # Create input data
         x = torch.randn(batch_size, 3, img_size, img_size, device=self.device, dtype=self.dtype)
 
-        # ... [Verbose and Un-merge verification code from your original file] ...
+        if verbose:
+            if hasattr(model, 'blocks'):
+                print("\n" + "="*50)
+                print("详细模式: 正在验证Token合并路径...")
+                handles = []
+                def create_pre_hook(block_index):
+                    def pre_hook(module, inputs):
+                        print(f"  - 输入到 Block {block_index:02d}: {inputs[0].shape[1]} tokens")
+                    return pre_hook
+                for i, block in enumerate(model.blocks):
+                    handles.append(block.register_forward_pre_hook(create_pre_hook(i)))
+                with torch.no_grad(), torch.autocast(device_type='cuda', dtype=self.dtype):
+                    _ = model(x)
+                for handle in handles:
+                    handle.remove()
+                print("Token路径验证完毕。")
+                print("="*50 + "\n")
 
         # Warmup and performance test
         with torch.no_grad(), torch.autocast(device_type='cuda', dtype=self.dtype):

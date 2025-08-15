@@ -178,7 +178,6 @@ def tome_apply_patch(
     prop_attn: bool = True,
     h: Optional[int] = None,
     use_naive_local: bool = False,
-    sparse: bool = False,
     source_tracking_mode: str = 'map'
 ):
     print("\n✅ [dEbUg] Successfully called the MODIFIED tome_apply_patch function!\n")
