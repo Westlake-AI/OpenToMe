@@ -219,22 +219,22 @@ def make_tome_class(transformer_class):
         def get_kept_num(self):
             prune_kept_num = []
             merge_kept_num = []
-            for block in self.module.blockss:
+            for block in self.blocks:
                 prune_kept_num.append(int(block.prune_ddp.kept_token_number))
                 merge_kept_num.append(int(block.merge_ddp.kept_token_number))
             return prune_kept_num, merge_kept_num
                 
 
         def set_kept_num(self, prune_kept_numbers, merge_kept_numbers):
-            assert len(prune_kept_numbers) == len(self.module.blockss) and len(merge_kept_numbers) == len(self.module.blockss)
-            for block, prune_kept_number, merge_kept_number in zip(self.module.blockss, prune_kept_numbers, merge_kept_numbers):
+            assert len(prune_kept_numbers) == len(self.blocks) and len(merge_kept_numbers) == len(self.blocks)
+            for block, prune_kept_number, merge_kept_number in zip(self.blocks, prune_kept_numbers, merge_kept_numbers):
                 block.prune_ddp.kept_token_number = prune_kept_number
                 block.merge_ddp.kept_token_number = merge_kept_number
         
         def init_kept_num_using_ratio(self, ratio):
             import math
             N = self.patch_embed.num_patches
-            for block in self.module.blockss:
+            for block in self.blocks:
                 r = math.floor(N - N*ratio)
                 block.prune_ddp.kept_token_number = N - 0 
                 block.merge_ddp.kept_token_number = N - r
@@ -242,7 +242,7 @@ def make_tome_class(transformer_class):
             
         def init_kept_num_using_r(self, r):
             N = self.patch_embed.num_patches
-            for block in self.module.blockss:
+            for block in self.blocks:
                 r = min(r, N // 2)
                 block.prune_ddp.kept_token_number = N - 0 
                 block.merge_ddp.kept_token_number = N - r
@@ -251,7 +251,7 @@ def make_tome_class(transformer_class):
         def calculate_flop_training(self):
             C = self.embed_dim
             patch_number = float(self.patch_embed.num_patches)
-            N = torch.tensor(patch_number + 1, device=self.module.blockss[0].prune_ddp.selected_probability.device)
+            N = torch.tensor(patch_number + 1, device=self.blocks[0].prune_ddp.selected_probability.device)
             flops = 0
             patch_embedding_flops = N*C*(self.patch_embed.patch_size[0] * self.patch_embed.patch_size[1] * 3)
             classifier_flops = C*self.num_classes
@@ -271,12 +271,12 @@ def make_tome_class(transformer_class):
         def calculate_flop_inference(self):
             C = self.embed_dim
             patch_number = float(self.patch_embed.num_patches)
-            N = torch.tensor(patch_number+1, device=self.module.blockss[0].prune_ddp.selected_probability.device)
+            N = torch.tensor(patch_number+1, device=self.blocks[0].prune_ddp.selected_probability.device)
             flops = 0
             patch_embedding_flops = N*C*(self.patch_embed.patch_size[0]*self.patch_embed.patch_size[1]*3)
             classifier_flops = C*self.num_classes
             with torch.cuda.amp.autocast(enabled=False):
-                for block in (self.module.blockss):
+                for block in (self.blocks):
                     prune_kept_number = block.prune_ddp.kept_token_number
                     merge_kept_number = block.merge_ddp.kept_token_number
                     mhsa_flops = 4*N*C*C + 2*N*N*C
@@ -312,8 +312,8 @@ def diffrate_apply_patch(
         "mask": None,           # only for training
         "source": None,
         "trace_source": trace_source,
-        "class_token": getattr(model.module, 'cls_token', None) is not None,
-        "distill_token": getattr(model.module, 'dist_token', None) is not None,
+        "class_token": getattr(model, 'cls_token', None) is not None,
+        "distill_token": getattr(model, 'dist_token', None) is not None,
     }
 
     block_index = 0
@@ -322,9 +322,9 @@ def diffrate_apply_patch(
         if isinstance(module, (Block, TimmBlock)):
             module.__class__ = DiffRateBlock
             if block_index in non_compressed_block_index:
-                module.introduce_diffrate(model.module.patch_embed.num_patches, model.module.patch_embed.num_patches + 1, model.module.patch_embed.num_patches + 1)
+                module.introduce_diffrate(model.patch_embed.num_patches, model.patch_embed.num_patches + 1, model.patch_embed.num_patches + 1)
             else:
-                module.introduce_diffrate(model.module.patch_embed.num_patches, prune_granularity, merge_granularity)
+                module.introduce_diffrate(model.patch_embed.num_patches, prune_granularity, merge_granularity)
             block_index += 1
             module._tome_info = model._tome_info
         elif isinstance(module, (Attention, TimmAttention)):

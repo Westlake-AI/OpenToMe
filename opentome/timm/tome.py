@@ -156,7 +156,7 @@ def make_tome_class(transformer_class):
 
         def forward(self, *args, **kwdargs) -> torch.Tensor:
             self._tome_info["r"] = parse_r(
-                len(self.module.blocks), self.r, self._tome_info["total_merge"])
+                len(self.blocks), self.r, self._tome_info["total_merge"])
             self._tome_info["size"] = None
             self._tome_info["source_map"] = None
             self._tome_info["source_matrix"] = None
@@ -178,6 +178,7 @@ def tome_apply_patch(
     prop_attn: bool = True,
     h: Optional[int] = None,
     use_naive_local: bool = False,
+    sparse: bool = False,
     source_tracking_mode: str = 'map'
 ):
     print("\n✅ [dEbUg] Successfully called the MODIFIED tome_apply_patch function!\n")

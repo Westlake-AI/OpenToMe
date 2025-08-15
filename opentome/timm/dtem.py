@@ -237,13 +237,13 @@ def make_tome_class(transformer_class):
 
             n = x.size(1)
             self._tome_info["r"] = parse_r(
-                len(self.module.blockss), self.r, self._tome_info["total_merge"]
+                len(self.blocks), self.r, self._tome_info["total_merge"]
             )
             self._tome_info["size"] = torch.ones_like(x[..., 0, None])
             self._tome_info["source"] = None
 
             out_dicts = []
-            for block in self.module.blockss:
+            for block in self.blocks:
                 x, size, n, out_dict = block(x, self._tome_info["size"], n=n)
                 out_dicts.append(out_dict)
 
@@ -280,8 +280,8 @@ def dtem_apply_patch(
         "total_merge": None,
         "trace_source": trace_source,
         "prop_attn": prop_attn,
-        "class_token": getattr(model.module, 'cls_token', None) is not None,
-        "distill_token": getattr(model.module, 'dist_token', None) is not None,
+        "class_token": getattr(model, 'cls_token', None) is not None,
+        "distill_token": getattr(model, 'dist_token', None) is not None,
         # DTEM hyperparameters
         "k2": None,
         "tau1": None,

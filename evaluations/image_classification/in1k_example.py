@@ -1,4 +1,11 @@
-#/zhoujingbo/yk/work/OpenToMe/evaluations/image_classification/in1k_example.py
+# Copyright (c) Westlake University CAIRI AI Lab.
+# All rights reserved.
+
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+# --------------------------------------------------------
+import argparse
+import logging
 import re
 import os
 import os.path as osp
@@ -9,13 +16,13 @@ import torch.distributed as dist
 from timm.utils import AverageMeter, reduce_tensor
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
-from opentome.timm import tome#, dtem, diffrate, tofu, mctf, crossget, dct, pitome
+from opentome.timm import tome, dtem, diffrate, tofu, mctf, crossget, dct, pitome
 from opentome.tome import tome as tm
-from opentome.utils.datasets import dataset_loader, accuracy
-import argparse
-import logging
+from opentome.utils import dataset_loader, accuracy
 
-torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.deterministic = True
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -31,11 +38,11 @@ def parse_args():
     # Dataset parameters
     parser.add_argument('--input_size', type=int, default=None, help='the input resolution')
     parser.add_argument('--dataset', type=str, default='data/ImageNet/val', help='the dataset to use for evaluation')
-    parser.add_argument('--batch_size', type=int, default=512, help='batch size for evaluation')
-    parser.add_argument('--num_workers', type=int, default=8, help='number of workers for data loading')
+    parser.add_argument('--batch_size', type=int, default=100, help='batch size for evaluation')
+    parser.add_argument('--num_workers', type=int, default=4, help='number of workers for data loading')
     # Environment parameters
-    parser.add_argument('--work_dir', type=str, default='work_dirs/in1k_classification', help='the dir to save logs and models')
-    parser.add_argument('--gpu-id', type=int, default=0, help='id of gpu to use ' '(only applicable to non-distributed testing)')
+    parser.add_argument('--work_dir', type=str, default='results/in1k_classification', help='the dir to save logs and models')
+    parser.add_argument('--gpu_id', type=int, default=0, help='id of gpu to use ' '(only applicable to non-distributed testing)')
     parser.add_argument('--launcher', choices=['none', 'slurm', 'pytorch'], default='none', help='job launcher')
     parser.add_argument('--local_rank', help='set local_rank for torch.distributed.launch (torch<2.0.0)', type=int, default=0)
     parser.add_argument('--local-rank', type=int, default=0)
@@ -45,6 +52,7 @@ def parse_args():
         os.environ['LOCAL_RANK'] = str(args.local_rank)
 
     return args
+
 
 def cleanup():
     dist.destroy_process_group()
@@ -102,6 +110,37 @@ def evaluation(args):
         logger.info(
             f'Model {args.model_name} loaded successfully., param count:{sum([m.numel() for m in model.parameters()])}')
 
+    # build tome methods before ddp
+    if args.tome.lower() in ['tome', 'tofu', 'crossget', 'dct', "pitome"]:
+        if args.tome == 'tome':
+            tome.tome_apply_patch(model, trace_source=True)
+        elif args.tome == 'tofu':
+            tofu.tofu_apply_patch(model, trace_source=True)
+        elif args.tome == 'crossget':
+            crossget.crossget_apply_patch(model, trace_source=True)
+        elif args.tome == 'dct':
+            dct.dct_apply_patch(model, trace_source=True)
+        elif args.tome == 'pitome':
+            pitome.pitome_apply_patch(model, trace_source=True)
+        if not hasattr(model, '_tome_info'):
+            raise ValueError("The model does not support ToMe/ToFu/CrossGET. Please use a model that supports ToMe.")
+    elif args.tome.lower() == 'dtem':
+        dtem.dtem_apply_patch(model, feat_dim=None)  # exteranal feature dim, defalut: none
+        if not hasattr(model, '_tome_info'):
+            raise ValueError("The model does not support DTEM. Please use a model that supports DTEM.")
+    elif args.tome.lower() == 'diffrate':
+        diffrate.diffrate_apply_patch(model, prune_granularity=4, merge_granularity=4)
+        if not hasattr(model, '_tome_info'):
+            raise ValueError("The model does not support DiffRate. Please use a model that supports DiffRate.")
+    elif args.tome.lower() == 'mctf':
+        mctf.mctf_apply_patch(model)
+        if not hasattr(model, '_tome_info'):
+            raise ValueError("The model does not support MCTF. Please use a model that supports MCTF.")
+    elif args.tome.lower() == 'none':
+        pass
+    else:
+        raise ValueError("Invalid ToMe implementation specified. Use 'tome' or 'none'.")
+
     # setup distributed training
     model = model.to(args.device)
     if args.distributed:
@@ -134,86 +173,64 @@ def evaluation(args):
         num_workers=args.num_workers,
     )
 
-    # Evaluation
+    # Evaluation with various merge numbers
     logger.info('Start evaluation with args: {}'.format(args))
     for merge_num in merge_list:
         assert merge_num >= 0, "Please specify a positive merge number."
         assert args.inflect in [-0.5, 1, 2], "Please specify a valid inflect value."
         if args.tome.lower() in ['tome', 'tofu', 'crossget', 'dct', "pitome"]:
-            if args.tome == 'tome':
-                tome.tome_apply_patch(model, trace_source=True)
-            elif args.tome == 'tofu':
-                tofu.tofu_apply_patch(model, trace_source=True)
-            elif args.tome == 'crossget':
-                crossget.crossget_apply_patch(model, trace_source=True)
-            elif args.tome == 'dct':
-                dct.dct_apply_patch(model, trace_source=True)
-            elif args.tome == 'pitome':
-                pitome.pitome_apply_patch(model, trace_source=True)
-            if not hasattr(model, '_tome_info'):
-                raise ValueError("The model does not support ToMe/ToFu/CrossGET. Please use a model that supports ToMe.")
             if args.merge_ratio is not None and merge_num is None:
                 merge_num = sum(tm.parse_r(len(model.module.blocks), r=(args.merge_ratio, args.inflect)))
             elif args.merge_ratio is None and merge_num is not None:
                 merge_ratio = tm.check_parse_r(len(model.module.blocks), merge_num, 
                                         (model.module.default_cfg["input_size"][1] / args.patch_size) ** 2, args.inflect)
             # update _tome_info
-            model.r = (merge_ratio, args.inflect)
-            model._tome_info["r"] = model.r
-            model._tome_info["total_merge"] = merge_num
-            logger.info(model._tome_info)
+            model.module.r = (merge_ratio, args.inflect)
+            model.module._tome_info["r"] = model.module.r
+            model.module._tome_info["total_merge"] = merge_num
+            logger.info(model.module._tome_info)
         elif args.tome.lower() == 'dtem':
-            dtem.dtem_apply_patch(model, feat_dim=None)  # exteranal feature dim, defalut: none
-            if not hasattr(model, '_tome_info'):
-                raise ValueError("The model does not support DTEM. Please use a model that supports DTEM.")
             if args.merge_ratio is not None and merge_num is None:
                 merge_num = sum(tm.parse_r(len(model.module.blocks), r=(args.merge_ratio, args.inflect)))
             elif args.merge_ratio is None and merge_num is not None:
                 merge_ratio = tm.check_parse_r(len(model.module.blocks), merge_num, 
                                         (model.module.default_cfg["input_size"][1]/args.patch_size) ** 2, args.inflect)
             # update _tome_info
-            model.r = (merge_ratio, args.inflect)
-            model._tome_info["r"] = model.r
-            model._tome_info["k2"] = 3
-            model._tome_info["tau1"] = 0.1
-            model._tome_info["tau2"] = 0.1
-            model._tome_info["total_merge"] = merge_num
-            logger.info(model._tome_info)
+            model.module.r = (merge_ratio, args.inflect)
+            model.module._tome_info["r"] = model.module.r
+            model.module._tome_info["k2"] = 3
+            model.module._tome_info["tau1"] = 0.1
+            model.module._tome_info["tau2"] = 0.1
+            model.module._tome_info["total_merge"] = merge_num
+            logger.info(model.module._tome_info)
         elif args.tome.lower() == 'diffrate':
-            diffrate.diffrate_apply_patch(model, prune_granularity=4, merge_granularity=4)
-            if not hasattr(model, '_tome_info'):
-                raise ValueError("The model does not support DiffRate. Please use a model that supports DiffRate.")
             r = merge_num / len(model.module.blocks) if merge_num is not None else 0
-            model.init_kept_num_using_r(int(r))
-            logger.info(model._tome_info)
+            model.module.init_kept_num_using_r(int(r))
+            logger.info(model.module._tome_info)
         elif args.tome.lower() == 'mctf':
-            mctf.mctf_apply_patch(model)
-            if not hasattr(model, '_tome_info'):
-                raise ValueError("The model does not support MCTF. Please use a model that supports MCTF.")
             if args.merge_ratio is not None and merge_num is None:
                 merge_num = sum(tm.parse_r(len(model.module.blocks), r=(args.merge_ratio, args.inflect)))
             elif args.merge_ratio is None and merge_num is not None:
                 merge_ratio = tm.check_parse_r(len(model.module.blocks), merge_num, 
                                         (model.module.default_cfg["input_size"][1]/args.patch_size) ** 2, args.inflect)
             # update _tome_info
-            model.r = (merge_ratio, args.inflect)
-            model._tome_info["r"] = model.r
-            model._tome_info["total_merge"] = merge_num
-            model._tome_info["one_step_ahead"] = 1
-            model._tome_info["tau_sim"] = 1
-            model._tome_info["tau_info"] = 20
-            model._tome_info["tau_size"] = 40
-            model._tome_info["bidirection"] = True
-            model._tome_info["pooling_type"] = 'none'
-            logger.info(model._tome_info)
+            model.module.r = (merge_ratio, args.inflect)
+            model.module._tome_info["r"] = model.module.r
+            model.module._tome_info["total_merge"] = merge_num
+            model.module._tome_info["one_step_ahead"] = 1
+            model.module._tome_info["tau_sim"] = 1
+            model.module._tome_info["tau_info"] = 20
+            model.module._tome_info["tau_size"] = 40
+            model.module._tome_info["bidirection"] = True
+            model.module._tome_info["pooling_type"] = 'none'
+            logger.info(model.module._tome_info)
         elif args.tome.lower() == 'none':
             pass
-        else:
-            raise ValueError("Invalid ToMe implementation specified. Use 'tome' or 'none'.")
 
-        # evaluate the model
+        # summarize the results
         top1 = AverageMeter()
         top5 = AverageMeter()
+
         model.eval()
         with torch.no_grad():
             for images, labels in tqdm(val_loader, desc="Evaluating"):

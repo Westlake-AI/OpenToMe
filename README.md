@@ -6,17 +6,20 @@
 
 ## Installation
 
-### Install from source
+### Install experimental dependencies
+
+```bash
+conda create -n opentome python=3.10.0
+conda activate opentome
+pip install torch==2.4.0 torchvision==0.19.0 torchaudio==2.4.0 --index-url https://download.pytorch.org/whl/cu124
+pip install -r requirements.txt
+```
+
+### Install OpenToMe from source
 ```bash
 git git@github.com:Westlake-AI/OpenToMe.git
 cd OpenToMe
 pip install -e .
-```
-
-### Install experiment dependencies
-
-```bash
-pip install -r requirements.txt
 ```
 
 ## Getting Started
@@ -93,44 +96,38 @@ z = model.forward(x)
 print(x.shape, z.shape)
 ```
 
-### ImageNet Image Classification
+### Image Classification on ImageNet
 
 Here is an example of evaluate ImageNet validation set with various Token Compression methods.
 ```bash
-#! /bin/bash
-
-export HF_ENDPOINT=https://hf-mirror.com
-
-cuda=$1
-tome=$2
-# Support multi round evaulation with different token merge, e.g. 144_98_46_10
-merge_num=$3
-dataset=$4
-gpus=$5
-
-CUDA_VISIBLE_DEVICES=$cuda python -m torch.distributed.launch --nproc_per_node=$gpus \
+CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.launch --nproc_per_node=4 \
 ./evaluations/image_classification/in1k_example.py \
---model_name vit_large_patch16_384 \
---tome $tome \
---merge_num $merge_num \
---dataset $dataset \
+--model_name vit_base_patch16_224 \
+--tome tome \
+--merge_num 100 \
+--dataset /PATH/TO/ImageNet/val \
 --inflect -0.5 \
+```
+You can also run the evaluation with the bash example on GPU0:
+```bash
+bash evaluations/image_classification/in1k_eval.sh 0 tome 100 /PATH/TO/ImageNet/val 1 deit_small_patch16_224
 ```
 
 ### Image ToMe Visualization
 Here is an example of visualization with various Token Compression methods
 ```bash
-export HF_ENDPOINT=https://hf-mirror.com
-
-tome=$1
-merge_num=$2
-
-CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch --nproc_per_node=1 \
-visualizations/tome_visualization.py \
---model_name vit_base_patch16_224 \
---tome $tome \
---merge_num $merge_num \
+CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch --nproc_per_node=0 \
+evaluations/visualizations/vis_classification.py \
+--image_path ./demo \
+--model_name deit_small_patch16_224 \
+--tome tome \
+--merge_num 100 \
+--inflect -0.5 \
 --save_vis True \
+```
+You can run the visualization with the bash example:
+```bash
+bash evaluations/visualizations/vis_eval.sh ./demo tome 100 1 deit_small_patch16_224
 ```
 
 ## Token Compression Baselines
@@ -145,7 +142,7 @@ visualizations/tome_visualization.py \
 - [x] **DCT [ACL2023]** Fourier Transformer: Fast Long Range Modeling by Removing Sequence Redundancy with FFT Operator [paper](https://arxiv.org/abs/2305.15099) [code](https://github.com/LUMIA-Group/FourierTransformer)
 
 
-## Support Tasks
+## Support Tasks (TODO List)
 
 - [x] Image Classification
   - [x] ToMe
@@ -159,9 +156,9 @@ visualizations/tome_visualization.py \
 - [ ] Image Generation
 - [ ] M/LLM Inference 
 - [ ] Long Sequence
-- [ ] Throughput
+- [x] Throughput
 - [ ] AI for Science
-- [ ] ToMe Visualization
+- [x] ToMe Visualization
   - [x] ToMe
   - [x] DiffRate
   - [x] DTEM
@@ -170,5 +167,19 @@ visualizations/tome_visualization.py \
   - [ ] CrossGET
   - [x] PiToMe
   - [ ] DCT
+
+## Citation
+
+If you find this repository useful, please consider giving a star ⭐ and citation:
+
+```bib
+@article{2025opentome,
+  title = {OpenToMe},
+  author = {Siyuan Li and Xin Jin and Kai Yu},
+  year = {2025},
+  url={https://github.com/Westlake-AI/OpenToMe},
+  urldate = {2025-08-15},
+}
+```
 
 <p align="right">(<a href="#top">back to top</a>)</p>
