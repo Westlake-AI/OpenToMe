@@ -1,5 +1,5 @@
 from .tome import bipartite_soft_matching, kth_bipartite_soft_matching, random_bipartite_soft_matching, \
-    merge_wavg, merge_source_map, merge_source_matrix, parse_r, check_parse_r
+    merge_wavg, merge_source, parse_r, check_parse_r
 from .crossget import crossget_bipartite_soft_matching, cross_merge_wavg
 from .mctf import mctf_bipartite_soft_matching, mctf_merge_wavg
 from .dct import dc_matching
@@ -8,7 +8,7 @@ from .pitome import pitome, pitome_bipartite_soft_matching, pitome_vision, pitom
 
 __all__ = [
     "bipartite_soft_matching", "kth_bipartite_soft_matching", "random_bipartite_soft_matching",
-    "merge_wavg", "merge_source_map", "merge_source_matrix", "parse_r", "check_parse_r", 
+    "merge_wavg", "merge_source", "parse_r", "check_parse_r", 
     "mctf_bipartite_soft_matching", "mctf_merge_wavg",
     "crossget_bipartite_soft_matching", "cross_merge_wavg",
     "dc_matching",

@@ -118,7 +118,4 @@ data
 *.pkl.json
 *.log.json
 work_dirs
-check_local_ToMe.py/results/
-/OpenToMe.egg-info/
-/results_ddp/
-/work_dirs/
+check_local_ToMe.py
