@@ -6,91 +6,70 @@ from throughput.benchmark import ThroughputBenchmark
 import torch
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
-# To ensure full reproducibility of experimental results at the cost of some performance.
-
 def main():
     parser = argparse.ArgumentParser(description="OpenToMe Throughput Benchmark Runner")
     parser.add_argument('--model-names', nargs='+', type=str, default=['deit_small_patch16_224'], help='List of timm model names.')
     parser.add_argument('--batch-size', type=int, default=16, help='Batch size for the benchmark.')
     parser.add_argument('--seq-lens', nargs='+', type=int, default=[196], help='List of sequence lengths (number of patches).')
     parser.add_argument('--algorithms', nargs='+', type=str, default=['tome', 'pitome'], help='List of algorithms to test. "none" is the baseline.')
-    parser.add_argument('--target-ratios', nargs='+', type=float, default=[0.25, 0.5], help='Target merge ratios to test (e.g., 0.5 to merge 50%% of total tokens).')
+    parser.add_argument('--target-ratios', nargs='+', type=float, default=[0.25, 0.5], help='要测试的目标合并比例x (例如, 0.5 表示希望合并掉总Token数的50%%).')
     parser.add_argument('--output-dir', type=str, default='results', help='Directory to save the benchmark results.')
     parser.add_argument('--output-file', type=str, default='throughput_benchmark.csv', help='Name of the output CSV file.')
     parser.add_argument('--warmup-iters', type=int, default=10, help='Number of warmup iterations.')
     parser.add_argument('--benchmark-iters', type=int, default=50, help='Number of benchmark iterations.')
-    parser.add_argument('--verbose', action='store_true', help='Enable verbose mode to print token counts per layer (once per config).')
+    parser.add_argument('--verbose', action='store_true', help='启用详细模式，打印每层的Token数量（每个配置只打印一次）.')
     
-    parser.add_argument('--tome-variants', nargs='+', type=str,
-                        default=['global_tome'],
-                        choices=['none', 'global_tome', 'local_tome', 'naive_local_tome'],
-                        help='List of ToMe variants to test. "none" is the baseline without merging.')
-    
-    # --- ✅ KEY MODIFICATION 1: Changed '--local-h' argument ---
-    # It now accepts a float ratio instead of a fixed integer.
-    # I've renamed it to '--local-h-ratio' for clarity.
-    parser.add_argument('--local-h-ratio', type=float, default=0.1,
-                        help='The window size (h) as a RATIO of the sequence length for local_tome variants.')
+    # --- **关键改动 1: 升级 --h 参数** ---
+    parser.add_argument('--h', nargs='+', type=int, default=[None],
+                        help='一个或多个ToMe局部合并的窗口大小。如果不提供此参数，则默认进行一次全局合并测试 (h=None)。')
     # --- END OF MODIFICATION ---
 
-    parser.add_argument('--source-tracking-modes', nargs='+', type=str, default=['map', 'matrix'],
-                        help="List of source tracking modes to test for ToMe variants. Options: 'map', 'matrix'.")
-    parser.add_argument('--verify-unmerge', action='store_true',
-                        help='After merging, run the corresponding un-merge function and print a comparison to verify correctness.')
+    parser.add_argument('--use-naive-local', action='store_true',
+                        help='If using local merging (h is set), this flag forces the use of the naive implementation.')
+
     args = parser.parse_args()
     
     benchmark = ThroughputBenchmark()
 
     for model_name in args.model_names:
         for seq_len in args.seq_lens:
-            for algorithm in args.algorithms:
-                if algorithm=='tome':
-                    for variant in args.tome_variants:
-                        if variant == 'none':
-                            # --- Run baseline (no merging) ---
-                            print(f"\nRunning: {model_name}, SeqLen: {seq_len}, Variant: none")
+            # --- **关键改动 2: 添加h值的循环** ---
+            for h_value in args.h:
+                for algorithm in args.algorithms:
+                    if algorithm == 'none':
+                        # "none" 算法与h无关，为避免重复运行，只在h_value是默认值时运行一次
+                        if h_value is not args.h[0]:
+                            continue
+                        print(f"\nRunning: {model_name}, SeqLen: {seq_len}, Algorithm: none")
+                        benchmark.run(
+                            model_name=model_name,
+                            batch_size=args.batch_size,
+                            seq_len=seq_len,
+                            algorithm='none',
+                            total_merge_num=0,
+                            warmup_iters=args.warmup_iters,
+                            benchmark_iters=args.benchmark_iters,
+                            verbose=args.verbose
+                        )
+                    else:
+                        for target_ratio in args.target_ratios:
+                            total_merge_num = int(target_ratio * seq_len)
+                            # 在打印信息中加入当前的h值
+                            h_info = f"h={h_value}" if h_value is not None else "Global"
+                            print(f"\nRunning: {model_name}, SeqLen: {seq_len}, Algorithm: {algorithm}, TargetRatio: {target_ratio} -> TotalMerge: {total_merge_num}, Merging: {h_info}")
                             benchmark.run(
-                                variant_name='none',
                                 model_name=model_name,
                                 batch_size=args.batch_size,
                                 seq_len=seq_len,
-                                algorithm='none',
-                                total_merge_num=0,
+                                algorithm=algorithm,
+                                total_merge_num=total_merge_num,
                                 warmup_iters=args.warmup_iters,
                                 benchmark_iters=args.benchmark_iters,
-                                verbose=args.verbose
+                                verbose=args.verbose,
+                                h=h_value, # 传递当前的h值
+                                use_naive_local=args.use_naive_local
                             )
-                        else:
-                            # --- Run ToMe variants ---
-                            use_naive = 'naive' in variant
-                            h_val = None
-                            if 'local' in variant:
-                                h_val = int(args.local_h_ratio * seq_len)
-                                if h_val < 1:
-                                    h_val = 1
-                            
-                            for target_ratio in args.target_ratios:
-                                for source_mode in args.source_tracking_modes:
-                                    total_merge_num = int(target_ratio * seq_len)
-                                    
-                                    print(f"\nRunning: {model_name}, SeqLen: {seq_len}, Variant: {variant}, TargetRatio: {target_ratio}, SourceMode: {source_mode}")
-                                    benchmark.run(
-                                        variant_name=variant,
-                                        model_name=model_name,
-                                        batch_size=args.batch_size,
-                                        seq_len=seq_len,
-                                        algorithm=algorithm,
-                                        total_merge_num=total_merge_num,
-                                        warmup_iters=args.warmup_iters,
-                                        benchmark_iters=args.benchmark_iters,
-                                        verbose=args.verbose,
-                                        h=h_val, # Pass the calculated integer h_val
-                                        use_naive_local=use_naive,
-                                        source_tracking_mode=source_mode,
-                                        verify_unmerge=args.verify_unmerge
-                                    )
-                else:
-                    print(f"We haven't complete the check of algorithm {algorithm}")
+            # --- END OF MODIFICATION ---
 
     results_df = benchmark.get_results()
     os.makedirs(args.output_dir, exist_ok=True)
@@ -103,5 +82,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-# PYTHONPATH=/yuchang/yk/work/OpenToMe:$PYTHONPATH python evaluations/run_benchmark.py  --algorithms none tome  --target-ratios 0.5 --source-tracking-modes matrix map --verify-unmerge
-# PYTHONPATH=/yuchang/yk/work/OpenToMe:$PYTHONPATH python evaluations/run_benchmark.py  --tome-variants none global_tome local_tome naive_local_tome     --source-tracking-modes matrix map  --local-h-ratio 0.05 --model-names deit_small_patch16_224   --seq-lens 1024 2048 4096 8192    --target-ratios 0.5     --batch-size 16

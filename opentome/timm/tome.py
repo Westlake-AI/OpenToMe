@@ -1,4 +1,13 @@
-#/zhoujingbo/yk/work/OpenToMe/opentome/timm/tome.py
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+# --------------------------------------------------------
+# References:
+# timm: https://github.com/rwightman/pytorch-image-models/tree/master/timm
+# --------------------------------------------------------
+
 from typing import Optional, Tuple
 import torch
 import torch.nn as nn
@@ -13,8 +22,7 @@ from timm.models.vision_transformer import Block as TimmBlock
 # NOTE: Assumes the functions from the previous step are available in this module.
 from opentome.tome.tome import (
     bipartite_soft_matching,
-    merge_source_matrix,
-    merge_source_map,
+    merge_source,
     merge_wavg,
     parse_r,
     # Assuming these functions were added to the tome.py file
@@ -107,40 +115,23 @@ class ToMeBlock(Block):
             if h is not None and h >= 0:
                 if use_naive_local:
                     # Use the naive (but clear) local implementation
-                    merge, _, current_level_map = naive_local_bipartite_soft_matching(
+                    merge, _ = naive_local_bipartite_soft_matching(
                         metric_val, r, h, class_token, distill_token
                     )
                 else:
                     # Use the optimized local implementation
-                    merge, _, current_level_map = local_bipartite_soft_matching(
+                    merge, _ = local_bipartite_soft_matching(
                         metric_val, r, h, class_token, distill_token
                     )
             else:
                 # If h is not specified, fall back to the original global matching
-                merge, _, current_level_map = bipartite_soft_matching(
+                merge, _ = bipartite_soft_matching(
                     metric_val, r, class_token, distill_token
                 )
             # --- END OF NEW LOGIC ---
 
             if self._tome_info["trace_source"]:
-                # --- NEW: Select tracking strategy based on the config ---
-                if self._tome_info["source_tracking_mode"] == 'map':
-                    source_map = self._tome_info["source_map"]
-                    
-                    # Initialize map on first run
-                    if source_map is None:
-                        b, t, _ = x.shape
-                        source_map = torch.arange(t, device=x.device, dtype=torch.long).expand(b, -1)
-                        
-                    self._tome_info["source_map"] = merge_source_map(
-                        current_level_map, x, source_map
-                    )
-                else: # 'matrix' mode
-                    source_matrix = self._tome_info["source_matrix"]
-                    self._tome_info["source_matrix"] = merge_source_matrix(
-                        merge, x, source_matrix
-                    )
-
+                self._tome_info["source"] = merge_source(merge, x, self._tome_info["source"])
             x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
 
         x = x + self._drop_path2(self.ls2(self.mlp(self.norm2(x))))
@@ -158,8 +149,7 @@ def make_tome_class(transformer_class):
             self._tome_info["r"] = parse_r(
                 len(self.module.blocks), self.r, self._tome_info["total_merge"])
             self._tome_info["size"] = None
-            self._tome_info["source_map"] = None
-            self._tome_info["source_matrix"] = None
+            self._tome_info["source"] = None
 
             return super().forward(*args, **kwdargs)
 
@@ -178,11 +168,7 @@ def tome_apply_patch(
     prop_attn: bool = True,
     h: Optional[int] = None,
     use_naive_local: bool = False,
-    source_tracking_mode: str = 'map'
 ):
-    print("\n✅ [dEbUg] Successfully called the MODIFIED tome_apply_patch function!\n")
-    print(source_tracking_mode)
-    
     """
     Applies ToMe to this transformer. Afterward, set r using model.r.
     
@@ -209,19 +195,18 @@ def tome_apply_patch(
     model._tome_info = {
         "r": model.r,
         "size": None,
-        "source_map": None,      # For 'map' mode
-        "source_matrix": None,   # For 'matrix' mode
+        "source": None,
         "total_merge": None,
         "trace_source": trace_source,
         "prop_attn": prop_attn,
-        "class_token": getattr(getattr(model, 'module', model), 'cls_token', None) is not None,
-        "distill_token": getattr(getattr(model, 'module', model), 'dist_token', None) is not None,
-        "source_tracking_mode": source_tracking_mode,
+        "class_token": getattr(model.module, 'cls_token', None) is not None,
+        "distill_token": getattr(model.module, 'dist_token', None) is not None,
+        # --- MODIFIED: Store h and the local merging flag ---
         "h": h,
         "use_naive_local": use_naive_local,
     }
 
-    if hasattr(model, "dist_token") and model.dist_token is not None:
+    if hasattr(model.module, "dist_token") and model.module.dist_token is not None:
         model._tome_info["distill_token"] = True
 
     for module in model.modules():
@@ -229,4 +214,4 @@ def tome_apply_patch(
             module.__class__ = ToMeBlock
             module._tome_info = model._tome_info
         elif isinstance(module, (Attention, TimmAttention)):
-            module.__class__ = ToMeAttention
+            module.__class__ = ToMeAttentionz

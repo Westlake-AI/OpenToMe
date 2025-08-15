@@ -1,3 +1,2 @@
-model_name,algorithm,batch_size,seq_len,target_total_merge,h,use_naive_local,source_tracking_mode,latency_ms,throughput_samples/s,peak_mem_mb,status
-deit_small_patch16_224,tome,16,196,98,,,matrix,19.733167774975303,810.8176133935508,198.03466796875,success
-deit_small_patch16_224,tome,16,196,98,,,map,18.30659911036491,874.0017686267598,199.18212890625,success
+model_name,algorithm,batch_size,seq_len,target_total_merge,h,latency_ms,throughput_samples/s,peak_mem_mb,status
+deit_small_patch16_224,tome,1,196,98,4,,,,failed
