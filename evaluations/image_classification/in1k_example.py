@@ -1,3 +1,4 @@
+#/zhoujingbo/yk/work/OpenToMe/evaluations/image_classification/in1k_example.py
 import re
 import os
 import os.path as osp
@@ -8,7 +9,7 @@ import torch.distributed as dist
 from timm.utils import AverageMeter, reduce_tensor
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
-from opentome.timm import tome, dtem, diffrate, tofu, mctf, crossget, dct, pitome
+from opentome.timm import tome#, dtem, diffrate, tofu, mctf, crossget, dct, pitome
 from opentome.tome import tome as tm
 from opentome.utils.datasets import dataset_loader, accuracy
 import argparse
@@ -213,7 +214,6 @@ def evaluation(args):
         # evaluate the model
         top1 = AverageMeter()
         top5 = AverageMeter()
-
         model.eval()
         with torch.no_grad():
             for images, labels in tqdm(val_loader, desc="Evaluating"):
