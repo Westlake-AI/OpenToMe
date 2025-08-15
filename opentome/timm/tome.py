@@ -147,7 +147,7 @@ def make_tome_class(transformer_class):
 
         def forward(self, *args, **kwdargs) -> torch.Tensor:
             self._tome_info["r"] = parse_r(
-                len(self.module.blocks), self.r, self._tome_info["total_merge"])
+                len(self.blocks), self.r, self._tome_info["total_merge"])
             self._tome_info["size"] = None
             self._tome_info["source"] = None
 
@@ -199,14 +199,14 @@ def tome_apply_patch(
         "total_merge": None,
         "trace_source": trace_source,
         "prop_attn": prop_attn,
-        "class_token": getattr(model.module, 'cls_token', None) is not None,
-        "distill_token": getattr(model.module, 'dist_token', None) is not None,
+        "class_token": getattr(model, 'cls_token', None) is not None,
+        "distill_token": getattr(model, 'dist_token', None) is not None,
         # --- MODIFIED: Store h and the local merging flag ---
         "h": h,
         "use_naive_local": use_naive_local,
     }
 
-    if hasattr(model.module, "dist_token") and model.module.dist_token is not None:
+    if hasattr(model, "dist_token") and model.dist_token is not None:
         model._tome_info["distill_token"] = True
 
     for module in model.modules():
@@ -214,4 +214,4 @@ def tome_apply_patch(
             module.__class__ = ToMeBlock
             module._tome_info = model._tome_info
         elif isinstance(module, (Attention, TimmAttention)):
-            module.__class__ = ToMeAttentionz
+            module.__class__ = ToMeAttention

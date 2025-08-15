@@ -1,11 +1,19 @@
-# evaluations/run_benchmark.py
+# Copyright (c) Westlake University CAIRI AI Lab.
+# All rights reserved.
+
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+# --------------------------------------------------------
 import argparse
 import os
 import pandas as pd
-from throughput.benchmark import ThroughputBenchmark
 import torch
+from opentome.utils import ThroughputBenchmark
+
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
+
+
 def main():
     parser = argparse.ArgumentParser(description="OpenToMe Throughput Benchmark Runner")
     parser.add_argument('--model-names', nargs='+', type=str, default=['deit_small_patch16_224'], help='List of timm model names.')
@@ -13,7 +21,7 @@ def main():
     parser.add_argument('--seq-lens', nargs='+', type=int, default=[196], help='List of sequence lengths (number of patches).')
     parser.add_argument('--algorithms', nargs='+', type=str, default=['tome', 'pitome'], help='List of algorithms to test. "none" is the baseline.')
     parser.add_argument('--target-ratios', nargs='+', type=float, default=[0.25, 0.5], help='要测试的目标合并比例x (例如, 0.5 表示希望合并掉总Token数的50%%).')
-    parser.add_argument('--output-dir', type=str, default='results', help='Directory to save the benchmark results.')
+    parser.add_argument('--output-dir', type=str, default='results/throughputs', help='Directory to save the benchmark results.')
     parser.add_argument('--output-file', type=str, default='throughput_benchmark.csv', help='Name of the output CSV file.')
     parser.add_argument('--warmup-iters', type=int, default=10, help='Number of warmup iterations.')
     parser.add_argument('--benchmark-iters', type=int, default=50, help='Number of benchmark iterations.')
@@ -79,6 +87,7 @@ def main():
     print(f"\n✅ Benchmark finished. Results saved to: {output_path}")
     print("\n--- Benchmark Summary ---")
     print(results_df)
+
 
 if __name__ == "__main__":
     main()

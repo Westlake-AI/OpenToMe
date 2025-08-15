@@ -1,25 +1,25 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
+# Copyright (c) Westlake University CAIRI AI Lab.
 # All rights reserved.
 
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
 # --------------------------------------------------------
+import argparse
 import os
 import os.path as osp
+import glob
+import random
 import timm
 import torch
-from opentome.timm import tome, dtem, diffrate, tofu, mctf, crossget, dct, pitome
-from opentome.tome import tome as tm
-import argparse
+from PIL import Image
 from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
-from PIL import Image
-import random
 from typing import List, Tuple
 import numpy as np
 import torch.nn.functional as F
-import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
+from opentome.timm import tome, dtem, diffrate, tofu, mctf, crossget, dct, pitome
+from opentome.tome import tome as tm
 
 torch.backends.cudnn.benchmark = True
 
@@ -89,8 +89,8 @@ def make_visualization(
     return vis_img
 
 
-def vis_eval(model, work_dir, args):
-    input_size = model.module.default_cfg["input_size"][1]
+def vis_eval(model_ddp, work_dir, args):
+    input_size = model_ddp.module.default_cfg["input_size"][1]
 
     # Make sure the transform is correct for your model!
     transform_list = [
@@ -101,29 +101,55 @@ def vis_eval(model, work_dir, args):
     transform_vis  = transforms.Compose(transform_list)
     transform_norm = transforms.Compose(transform_list + [
         transforms.ToTensor(),
-        transforms.Normalize(model.module.default_cfg["mean"], model.module.default_cfg["std"]),
+        transforms.Normalize(model_ddp.module.default_cfg["mean"], model_ddp.module.default_cfg["std"]),
     ])
-    
-    img = Image.open("./demo/n02510455_205.jpeg")
-    vis = transform_vis(img)
-    img = transform_norm(img)[None, ...]
-    model.eval()
-    _ = model(img)
 
+    # 1. 统一处理为文件夹路径
+    image_dir = args.image_path
+    if not osp.isdir(image_dir):
+        # 如果传入的是文件名，则取其父目录
+        image_dir = osp.dirname(args.image_path)
+        if not image_dir:
+            image_dir = '.'
+
+    # 2. 获取所有图片文件（支持常见图片格式）
+    img_exts = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tif', '*.tiff', '*.webp']
+    img_files = []
+    for ext in img_exts:
+        img_files.extend(glob.glob(osp.join(image_dir, ext)))
+    img_files = sorted(img_files)
+    if len(img_files) == 0:
+        raise FileNotFoundError(f"No images found in directory: {image_dir}")
+
+    # 3. 可视化保存目录
     if args.save_vis:
-        attn_source = model._tome_info["source"]
-        if attn_source is None:
-            raise ValueError("The model does not support ToMe visualization. Please use a model that supports ToMe visualization.")
-        print(f"{attn_source.shape[1]} tokens at the end")
-        vis = make_visualization(vis, attn_source, args.patch_size)
-        vis.save(osp.join(work_dir, '{}_{}_tokens.png'.format(args.tome, attn_source.shape[1])))
-        print("Visualization saved...")
+        vis_dir = osp.join(work_dir, 'vis')
+        os.makedirs(vis_dir, exist_ok=True)
+
+    model_ddp.eval()
+    for img_path in img_files:
+        img_name = osp.splitext(osp.basename(img_path))[0]
+        img_pil = Image.open(img_path).convert('RGB')
+        vis = transform_vis(img_pil)
+        img = transform_norm(img_pil)[None, ...]
+        _ = model_ddp(img)
+
+        if args.save_vis:
+            attn_source = model_ddp.module._tome_info["source"]
+            if attn_source is None:
+                raise ValueError("The model does not support ToMe visualization. Please use a model that supports ToMe visualization.")
+            print(f"{img_name}: {attn_source.shape[1]} tokens at the end")
+            vis_img = make_visualization(vis, attn_source, args.patch_size)
+            save_path = osp.join(vis_dir, '{}_{}_tokens.png'.format(img_name, attn_source.shape[1]))
+            vis_img.save(save_path)
+            print(f"Visualization saved: {save_path}")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description='OpenToMe test (and eval) a model')
     # Baiscal parameters
+    parser.add_argument('--image_path', type=str, default='./demo/n02510455_205.jpeg', help='path to image or folder of images')
     parser.add_argument('--model_name', type=str, default='vit_base_patch16_224', help='evaluation model name')
     parser.add_argument('--patch_size', type=int, default=16, help='model patch size')
     parser.add_argument('--tome', type=str, default='none', help='ToMe implementation to use, options: [tome, none]')
@@ -132,8 +158,8 @@ def parse_args():
     parser.add_argument('--inflect', type=float, default=-0.5, help='the inflect of merge ratio, default: -0.5')
     parser.add_argument('--save_vis', type=bool, default=True, help='whether to save the visualization of the merge tokens')
     # Environment parameters
-    parser.add_argument('--work_dir', type=str, default='work_dirs/visualization', help='the dir to save logs and models')
-    parser.add_argument('--gpu-id', type=int, default=0, help='id of gpu to use ' '(only applicable to non-distributed testing)')
+    parser.add_argument('--work_dir', type=str, default='results/visualization', help='the dir to save logs and models')
+    parser.add_argument('--gpu_id', type=int, default=0, help='id of gpu to use ' '(only applicable to non-distributed testing)')
     parser.add_argument('--launcher', choices=['none', 'slurm', 'pytorch'], default='none', help='job launcher')
     parser.add_argument('--local_rank', help='set local_rank for torch.distributed.launch (torch<2.0.0)', type=int, default=0)
     parser.add_argument('--local-rank', type=int, default=0)
@@ -177,13 +203,6 @@ def main():
     if args.local_rank == 0:
         print(f'Model {args.model_name} loaded successfully., param count:{sum([m.numel() for m in model.parameters()])}')
 
-    # setup distributed training
-    model = model.to(args.device)
-    if args.distributed:
-        if args.local_rank == 0:
-            print("Using native Torch DistributedDataParallel.")
-        model = DDP(model, device_ids=[args.local_rank])
-
     assert args.merge_num >= 0, "Please specify a positive merge number."
     assert args.inflect in [-0.5, 1, 2], "Please specify a valid inflect value."
     if args.tome.lower() in ['tome', 'tofu', 'crossget', 'dct', "pitome"]:
@@ -200,10 +219,10 @@ def main():
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support ToMe/ToFu/CrossGET. Please use a model that supports ToMe.")
         if args.merge_ratio is not None and args.merge_num is None:
-            args.merge_num = sum(tm.parse_r(len(model.module.blocks), r=(args.merge_ratio, args.inflect)))
+            args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, args.inflect)))
         elif args.merge_ratio is None and args.merge_num is not None:
-            merge_ratio = tm.check_parse_r(len(model.module.blocks), args.merge_num, 
-                                    (model.module.default_cfg["input_size"][1] / args.patch_size) ** 2, args.inflect)
+            merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
+                                    (model.default_cfg["input_size"][1] / args.patch_size) ** 2, args.inflect)
         # update _tome_info
         model.r = (merge_ratio, args.inflect)
         model._tome_info["r"] = model.r
@@ -213,10 +232,10 @@ def main():
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support DTEM. Please use a model that supports DTEM.")
         if args.merge_ratio is not None and args.merge_num is None:
-            args.merge_num = sum(tm.parse_r(len(model.module.blocks), r=(args.merge_ratio, args.inflect)))
+            args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, args.inflect)))
         elif args.merge_ratio is None and args.merge_num is not None:
-            merge_ratio = tm.check_parse_r(len(model.module.blocks), args.merge_num, 
-                                    (model.module.default_cfg["input_size"][1] / args.patch_size) ** 2, args.inflect)
+            merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
+                                    (model.default_cfg["input_size"][1] / args.patch_size) ** 2, args.inflect)
         # update _tome_info
         model.r = (merge_ratio, args.inflect)
         model._tome_info["r"] = model.r
@@ -228,17 +247,17 @@ def main():
         diffrate.diffrate_apply_patch(model, prune_granularity=4, merge_granularity=4)
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support DiffRate. Please use a model that supports DiffRate.")
-        r = args.merge_num / len(model.module.blocks) if args.merge_num is not None else 0
+        r = args.merge_num / len(model.blocks) if args.merge_num is not None else 0
         model.init_kept_num_using_r(int(r))
     elif args.tome.lower() == 'mctf':
         mctf.mctf_apply_patch(model)
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support MCTF. Please use a model that supports MCTF.")
         if args.merge_ratio is not None and args.merge_num is None:
-            args.merge_num = sum(tm.parse_r(len(model.module.blocks), r=(args.merge_ratio, args.inflect)))
+            args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, args.inflect)))
         elif args.merge_ratio is None and args.merge_num is not None:
-            merge_ratio = tm.check_parse_r(len(model.module.blocks), args.merge_num, 
-                                    (model.module.default_cfg["input_size"][1] / args.patch_size) ** 2, args.inflect)
+            merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
+                                    (model.default_cfg["input_size"][1] / args.patch_size) ** 2, args.inflect)
         # update _tome_info
         model.r = (merge_ratio, args.inflect)
         model._tome_info["r"] = model.r
@@ -253,7 +272,14 @@ def main():
         pass
     else:
         raise ValueError("Invalid ToMe implementation specified. Use 'tome' or 'none'.")
-    
+
+    # setup ddp after building the model
+    model = model.to(args.device)
+    if args.distributed:
+        if args.local_rank == 0:
+            print("Using native Torch DistributedDataParallel.")
+        model = DDP(model, device_ids=[args.local_rank])
+
     vis_eval(model, work_dir, args)
 
 

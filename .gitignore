@@ -118,4 +118,4 @@ data
 *.pkl.json
 *.log.json
 work_dirs
-check_local_ToMe.py
+results

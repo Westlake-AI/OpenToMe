@@ -6,7 +6,6 @@
 # --------------------------------------------------------
 
 import math
-import numpy as np
 from typing import Callable, List, Tuple, Union
 import torch.nn.functional as F
 import torch

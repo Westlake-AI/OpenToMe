@@ -3,13 +3,17 @@
 ### huggingface
 export HF_ENDPOINT=https://hf-mirror.com
 
-tome=$1
-merge_num=$2
-gpu=$3
+image_path=$1
+tome=$2
+merge_num=$3
+gpu=$4
+# Model name parameter with default value
+model_name=${5:-vit_base_patch16_224}
 
 CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.launch --nproc_per_node=$gpu \
-visualizations/tome_visualization.py \
---model_name vit_base_patch16_224 \
+evaluations/visualizations/vis_classification.py \
+--image_path $image_path \
+--model_name $model_name \
 --tome $tome \
 --merge_num $merge_num \
 --inflect -0.5 \
