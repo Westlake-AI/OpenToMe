@@ -5,6 +5,8 @@ omegaconf
 PyYAML==6.0.2
 requests
 
-torchmetrics
+# torchmetrics
 
 timm==0.9.11
+pandas
+matplotlib

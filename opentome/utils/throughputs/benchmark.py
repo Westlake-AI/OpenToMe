@@ -1,15 +1,51 @@
-# evaluations/throughput/benchmark.py
+# /zhoujingbo/yk/work/OpenToMe/opentome/utils/throughputs/benchmark.py
+# -------------------------------------------------------------------
+# 此文件整合了原 evaluations/utils/timer.py,
+# 和 evaluations/throughput/benchmark.py 的功能。
+# -------------------------------------------------------------------
+
+import timeit
+import numpy as np
 import torch
 import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel as DDP
 import timm
 import pandas as pd
-import numpy as np
 import math
 from typing import Optional
-from evaluations.utils.unwrap import unwrap_model
+
+# [--- 从 evaluations/utils/timer.py 整合而来 ---]
+class Timer:
+    """Simple timer class, adapted from the original script."""
+    def __init__(self, stmt, globals=None, label="", sub_label="", description=""):
+        self.timer = timeit.Timer(stmt, globals=globals)
+        self.label = label
+        self.sub_label = sub_label
+        self.description = description
+        self.runs = None
+        self.timing = None
+        self.mean = None
+        self.std = None
+
+    def timeit(self, number=1, repeat=2):
+        self.runs = number
+        # timeit.repeat returns a list of total times for each repeat
+        raw_timings = self.timer.repeat(number=number, repeat=repeat)
+        self.timing = [t / number for t in raw_timings] # time per run
+        self.mean = np.mean(self.timing)
+        self.std = np.std(self.timing)
+        return self
+
+    def __str__(self):
+        return ( 
+            f"{self.label:<10} {self.sub_label:<40} {self.description:<10} "
+            f"mean: {self.mean*1000:.3f} ms, std: {self.std*1000:.3f} ms"
+        )
+
+# [--- 从 evaluations/throughput/benchmark.py 整合而来 ---]
+# 注意：内部的导入语句已经被调整
 from opentome.tome import tome as tm
-from opentome.tome.tome import token_unmerge, token_unmerge_from_map
-from evaluations.utils.timer import Timer
+# from opentome.tome.tome import token_unmerge, token_unmerge_from_map # 如有需要可取消注释
 from opentome.timm import tome_apply_patch
 
 class ThroughputBenchmark:
@@ -22,9 +58,7 @@ class ThroughputBenchmark:
         self.results = []
 
     def run(self,
-            # --- KEY MODIFICATION 1: Added 'variant_name' for clear logging ---
             variant_name: str,
-            # --- END OF MODIFICATION ---
             model_name: str,
             batch_size: int,
             seq_len: int,
@@ -46,8 +80,6 @@ class ThroughputBenchmark:
         patch_size = int(model_name.split('_patch')[-1].split('_')[0])
         img_size = int(math.sqrt(seq_len)) * patch_size
         model = timm.create_model(model_name, img_size=img_size, pretrained=False).to(self.device).eval()
-
-        model = unwrap_model(model)
 
         if algorithm == "tome":
             tome_apply_patch(
@@ -75,22 +107,18 @@ class ThroughputBenchmark:
                 model._tome_info["total_merge"] = total_merge_num
 
                 print(f"  [Final Config] Algorithm '{algorithm}' configured successfully.")
-                print(f"    - Target Total Merges: {total_merge_num}")
-                print(f"    - Calculated Ratio: {merge_ratio_calculated:.4f}")
-                print(f"    - Set Config Tuple _tome_info['r']: {model._tome_info['r']}")
+                print(f"   - Target Total Merges: {total_merge_num}")
+                print(f"   - Calculated Ratio: {merge_ratio_calculated:.4f}")
+                print(f"   - Set Config Tuple _tome_info['r']: {model._tome_info['r']}")
                 
                 if h is not None and h >= 0:
-                    print(f"    - Local Merging: Enabled (h={h}, naive={use_naive_local})")
+                    print(f"   - Local Merging: Enabled (h={h}, naive={use_naive_local})")
                 else:
-                    print(f"    - Local Merging: Disabled (Global)")
+                    print(f"   - Local Merging: Disabled (Global)")
         
-        # (Sections 4, 5, 6, 7 remain largely the same, only the result logging is changed)
-        # ... [Code for data creation, verbose mode, un-merge verification, and timing] ...
-        # The following is the final part of the method, showing the change in logging.
-
         # Create input data
         x = torch.randn(batch_size, 3, img_size, img_size, device=self.device, dtype=self.dtype)
-
+        
         if verbose:
             if hasattr(model, 'blocks'):
                 print("\n" + "="*50)
@@ -100,7 +128,6 @@ class ThroughputBenchmark:
                     def pre_hook(module, inputs):
                         print(f"  - 输入到 Block {block_index:02d}: {inputs[0].shape[1]} tokens")
                     return pre_hook
-                    
                 for i, block in enumerate(model.blocks):
                     handles.append(block.register_forward_pre_hook(create_pre_hook(i)))
                 with torch.no_grad(), torch.autocast(device_type='cuda', dtype=self.dtype):
@@ -110,36 +137,48 @@ class ThroughputBenchmark:
                 print("Token路径验证完毕。")
                 print("="*50 + "\n")
 
-        # Warmup and performance test
-        with torch.no_grad(), torch.autocast(device_type='cuda', dtype=self.dtype):
-            for _ in range(warmup_iters):
-                _ = model(x)
-        torch.cuda.synchronize()
+        try:
+            # Warmup and performance test
+            with torch.no_grad(), torch.autocast(device_type='cuda', dtype=self.dtype):
+                for _ in range(warmup_iters):
+                    _ = model(x)
+            torch.cuda.synchronize()
 
-        timer = Timer(
-            stmt=lambda: model(x),
-            globals={'model': model, 'x': x},
-            label=algorithm,
-            sub_label=f"model={model_name}, bs={batch_size}, seq_len={seq_len}, total_merge={total_merge_num}"
-        )
+            # Timer 类现在是本地的，无需导入
+            timer = Timer(
+                stmt=lambda: model(x),
+                globals={'model': model, 'x': x},
+                label=algorithm,
+                sub_label=f"model={model_name}, bs={batch_size}, seq_len={seq_len}, total_merge={total_merge_num}"
+            )
+            
+            torch.cuda.reset_peak_memory_stats(self.device)
+            with torch.no_grad(), torch.autocast(device_type='cuda', dtype=self.dtype):
+                measurement = timer.timeit(number=benchmark_iters)
+            peak_mem_mb = torch.cuda.max_memory_allocated(self.device) / (1024 ** 2)
+            latency_ms = measurement.mean * 1000
+            throughput_samples_per_sec = batch_size / measurement.mean
+            print(f"  Done: {str(measurement)}, Peak Mem: {peak_mem_mb:.2f} MB")
+            status = 'success'
         
-        torch.cuda.reset_peak_memory_stats(self.device)
-        with torch.no_grad(), torch.autocast(device_type='cuda', dtype=self.dtype):
-            measurement = timer.timeit(number=benchmark_iters)
-        peak_mem_mb = torch.cuda.max_memory_allocated(self.device) / (1024 ** 2)
-        latency_ms = measurement.mean * 1000
-        throughput_samples_per_sec = batch_size / measurement.mean
-        print(f"  Done: {str(measurement)}, Peak Mem: {peak_mem_mb:.2f} MB")
-        status = 'success'
+        except torch.OutOfMemoryError as e:
+            # 捕获到显存溢出错误
+            torch.cuda.empty_cache()  # 清理一下显存，为下一个测试做准备
+            print(f"  ❌ CAUGHT OOM ERROR: Failed for config (model={model_name}, seq_len={seq_len}, variant={variant_name}).")
+            
+            # 将性能指标置为空值 (NaN)，并在状态中注明失败原因
+            latency_ms = np.nan
+            throughput_samples_per_sec = np.nan
+            peak_mem_mb = np.nan  # 或者可以记录发生OOM时的显存峰值
+            status = 'OOM_failure'
         
-        # --- KEY MODIFICATION 2: Updated the results dictionary ---
         self.results.append({
             'model_name': model_name,
-            'variant': variant_name,  # Use the high-level variant name
+            'variant': variant_name,
             'batch_size': batch_size,
             'seq_len': seq_len,
             'target_total_merge': total_merge_num,
-            'h': h if 'local' in variant_name else np.nan,  # Log h for local variants
+            'h': h if 'local' in variant_name else np.nan,
             'use_naive_local': use_naive_local if 'local' in variant_name else np.nan,
             'source_tracking_mode': source_tracking_mode if algorithm == 'tome' else 'N/A',
             'latency_ms': latency_ms,
@@ -147,7 +186,6 @@ class ThroughputBenchmark:
             'peak_mem_mb': peak_mem_mb,
             'status': status
         })
-        # --- END OF MODIFICATION ---
 
     def get_results(self):
         return pd.DataFrame(self.results)

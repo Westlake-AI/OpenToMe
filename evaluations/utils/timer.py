@@ -14,7 +14,7 @@ class Timer:
         self.mean = None
         self.std = None
 
-    def timeit(self, number=1, repeat=1):
+    def timeit(self, number=1, repeat=2):
         self.runs = number
         # timeit.repeat returns a list of total times for each repeat
         raw_timings = self.timer.repeat(number=number, repeat=repeat)
