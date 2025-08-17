@@ -1,13 +1,17 @@
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+# --------------------------------------------------------
+# References:
+# CrossGET: https://github.com/sdc17/CrossGET
+# --------------------------------------------------------
+
 import math
-import numpy as np
 from typing import Callable, List, Tuple, Union
 import torch.nn.functional as F
 import torch
 from .tome import do_nothing
 
-"""
-    CrossGet still in development, not used in the paper yet
-""" 
+
 def crossget_bipartite_soft_matching(
     metric: torch.Tensor,
     r: int,

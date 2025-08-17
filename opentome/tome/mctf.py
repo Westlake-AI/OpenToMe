@@ -1,13 +1,16 @@
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+# --------------------------------------------------------
+# References:
+# MCTF: https://github.com/mlvlab/MCTF
+# --------------------------------------------------------
+
 import math
-import numpy as np
 from typing import Callable, List, Tuple, Union
-import torch.nn.functional as F
 import torch
 from .tome import do_nothing
 
-"""
-    MCTF specific functions
-"""
+
 def mctf_bipartite_soft_matching(
     metric: torch.Tensor,
     r: int,

@@ -19,7 +19,7 @@ model_name=$5
 
 # Define all ToMe methods to test
 # tome_methods=("crossget" "dct" "dtem" "mctf" "pitome" "tofu" "tome")
-tome_methods=("dct" "mctf" "pitome" "tofu" "tome")
+tome_methods=("dct" "dtem" "mctf" "pitome" "tofu" "tome")
 
 echo "Starting ToMe methods testing for image classification..."
 echo "CUDA: $cuda"

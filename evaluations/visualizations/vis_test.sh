@@ -18,7 +18,7 @@ model_name=$4
 
 # Define all ToMe methods to test
 # tome_methods=("crossget" "dct" "dtem" "mctf" "pitome" "tofu" "tome")
-tome_methods=("dtem" "mctf" "pitome" "tofu" "tome")
+tome_methods=("dct" "dtem" "mctf" "pitome" "tofu" "tome")
 
 echo "Starting ToMe methods testing..."
 echo "Image path: $image_path"

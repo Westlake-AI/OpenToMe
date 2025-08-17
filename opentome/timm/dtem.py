@@ -46,8 +46,8 @@ class DTEMLinear(nn.Linear):
             return out[..., :-self.feat_dim], out[..., -self.feat_dim:]
         
         # training
-        out1 = self.qkv_layer(input)
-        out2 = self.metric_layer(input.detach())
+        out1 = self.qkv_layer(input)  # Shape: (B, N, 3 * num_heads * head_dim)
+        out2 = self.metric_layer(input.detach())  # Shape: (B, N, feat_dim)
         return out1, out2
 
 
@@ -81,7 +81,10 @@ class DTEMAttention(Attention):
                 attn = attn.softmax(dim=-1)
             else:   # as in DynamicViT
                 _attn = attn - torch.max(attn, dim=-1, keepdim=True)[0]
-                _attn = _attn.exp_() * size[:, None, None, :].type(torch.float32)
+                # Fix: ensure size broadcasting is compatible with attn shape
+                # attn shape: [B, H, N, N], size shape: [B, N, 1]
+                # We need: size[:, None, None, :, 0] -> [B, 1, 1, N]
+                _attn = _attn.exp_() * size[:, None, None, :, 0].type(torch.float32)
                 attn = _attn / _attn.sum(dim=-1, keepdim=True)
             attn = self.attn_drop(attn)
             _x = attn @ v

@@ -1,13 +1,16 @@
-import math
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+# --------------------------------------------------------
+# References:
+# timm: https://github.com/rwightman/pytorch-image-models/tree/master/timm
+# --------------------------------------------------------
+
 import numpy as np
 from typing import Callable, List, Tuple, Union
-import torch.nn.functional as F
 import torch
 from .tome import do_nothing
 
-"""
-    DCT specific functions
-"""
+
 def dc_matching(
     metric: torch.Tensor,
     r: int,
