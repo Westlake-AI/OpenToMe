@@ -135,7 +135,14 @@ def vis_eval(model_ddp, work_dir, args):
         _ = model_ddp(img)
 
         if args.save_vis:
-            attn_source = model_ddp.module._tome_info["source"]
+            if args.tracking_mode == 'map':
+                attn_source = model_ddp.module._tome_info["source_map"]
+                raise ValueError("We not support map yet!")
+            elif args.tracking_mode == 'matrix':
+                attn_source = model_ddp.module._tome_info["source_matrix"]
+            else:
+                raise ValueError("[Error] Only support matric and map mode.")
+            
             if attn_source is None:
                 raise ValueError("The model does not support ToMe visualization. Please use a model that supports ToMe visualization.")
             print(f"{img_name}: {attn_source.shape[1]} tokens at the end")
@@ -157,6 +164,7 @@ def parse_args():
     parser.add_argument('--merge_ratio', type=float, default=None, help='the ratio of merge tokens in per layers')
     parser.add_argument('--inflect', type=float, default=-0.5, help='the inflect of merge ratio, default: -0.5')
     parser.add_argument('--save_vis', type=bool, default=True, help='whether to save the visualization of the merge tokens')
+    parser.add_argument('--tracking_mode', type=str, default='map', choices=['map', 'matrix'])
     # Environment parameters
     parser.add_argument('--work_dir', type=str, default='results/visualization', help='the dir to save logs and models')
     parser.add_argument('--gpu_id', type=int, default=0, help='id of gpu to use ' '(only applicable to non-distributed testing)')
@@ -205,17 +213,18 @@ def main():
 
     assert args.merge_num >= 0, "Please specify a positive merge number."
     assert args.inflect in [-0.5, 1, 2], "Please specify a valid inflect value."
+    stm = args.tracking_mode
     if args.tome.lower() in ['tome', 'tofu', 'crossget', 'dct', "pitome"]:
         if args.tome == 'tome':
-            tome.tome_apply_patch(model, trace_source=True)
+            tome.tome_apply_patch(model, trace_source=True, source_tracking_mode=stm)
         elif args.tome == 'tofu':
-            tofu.tofu_apply_patch(model, trace_source=True)
+            tofu.tofu_apply_patch(model, trace_source=True, source_tracking_mode=stm)
         elif args.tome == 'crossget':
             crossget.crossget_apply_patch(model, trace_source=True)
         elif args.tome == 'dct':
             dct.dct_apply_patch(model, trace_source=True)
         elif args.tome == 'pitome':
-            pitome.pitome_apply_patch(model, trace_source=True)
+            pitome.pitome_apply_patch(model, trace_source=True, source_tracking_mode=stm)
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support ToMe/ToFu/CrossGET. Please use a model that supports ToMe.")
         if args.merge_ratio is not None and args.merge_num is None:
@@ -228,7 +237,7 @@ def main():
         model._tome_info["r"] = model.r
         model._tome_info["total_merge"] = args.merge_num
     elif args.tome.lower() == 'dtem':
-        dtem.dtem_apply_patch(model, feat_dim=None)  # exteranal feature dim, defalut: none
+        dtem.dtem_apply_patch(model, feat_dim=None, source_tracking_mode=stm)  # exteranal feature dim, defalut: none
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support DTEM. Please use a model that supports DTEM.")
         if args.merge_ratio is not None and args.merge_num is None:
@@ -250,7 +259,7 @@ def main():
         r = args.merge_num / len(model.blocks) if args.merge_num is not None else 0
         model.init_kept_num_using_r(int(r))
     elif args.tome.lower() == 'mctf':
-        mctf.mctf_apply_patch(model)
+        mctf.mctf_apply_patch(model, source_tracking_mode=stm)
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support MCTF. Please use a model that supports MCTF.")
         if args.merge_ratio is not None and args.merge_num is None:

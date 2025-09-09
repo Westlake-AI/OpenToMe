@@ -67,7 +67,7 @@ def dc_matching(
         return x.view(*metric_shape)
     
     if class_token:
-        cls = metric[:, 0, :].unsqueeze_(1)
+        cls_t = metric[:, 0, :].unsqueeze_(1)
         metric = metric[:, 1:, :]
     t = metric.shape[1]
     r = min(r, t // 2)
@@ -83,6 +83,6 @@ def dc_matching(
     metric = idct(dct_metric.transpose(0, 2), norm='ortho').transpose(0, 2).permute(1, 0, 2)
 
     if class_token:
-        return torch.cat([cls, metric], dim=1)
+        return torch.cat([cls_t, metric], dim=1)
     return metric
 

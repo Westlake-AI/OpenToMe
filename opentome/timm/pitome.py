@@ -19,7 +19,12 @@ from timm.models.vision_transformer import Attention as TimmAttention
 from timm.models.vision_transformer import Block as TimmBlock
 from opentome.timm import Attention, Block
 import math
-from opentome.tome.tome import parse_r, merge_source, merge_wavg
+from opentome.tome.tome import (
+    merge_source_matrix,
+    merge_source_map,
+    merge_wavg,
+    parse_r,
+)
 from opentome.tome.pitome import pitome_vision
 
 
@@ -97,8 +102,18 @@ class PiToMeBlock(Block):
                             margin = self.margin,
                             use_bsm_pitome = use_bsm_pitome
                         )
+            # TODO We don't implements the 'map' yet.
             if self._tome_info["trace_source"]:
-                self._tome_info["source"] = merge_source(merge, x, self._tome_info["source"])
+                if self._tome_info["source_tracking_mode"] == 'map':
+                    source_map = self._tome_info["source_map"]
+                    # Initialize map on first run
+                    if source_map is None:
+                        b, t, _ = x.shape
+                        source_map = torch.arange(t, device=x.device, dtype=torch.long).expand(b, -1)        
+                    self._tome_info["source_map"] = merge_source_map(current_level_map, x, source_map)
+                else: # 'matrix' mode
+                    source_matrix = self._tome_info["source_matrix"]
+                    self._tome_info["source_matrix"] = merge_source_matrix(merge, x, source_matrix)
 
             x,  self._tome_info["size"]  = merge_wavg(merge, x ,self._tome_info["size"]) 
         # print(r, x.shape, self.margin, use_bsm_pitome)
@@ -123,7 +138,8 @@ def make_tome_class(transformer_class):
             num_bsm_layers = math.ceil(len(self.blocks) * 0.5) 
             self._tome_info["use_bsm_pitome"] = [True] * (num_bsm_layers) + [False] * (len(self.blocks) - num_bsm_layers)
             self._tome_info["size"] = None
-            self._tome_info["source"] = None
+            self._tome_info["source_map"] = None
+            self._tome_info["source_matrix"] = None
 
             return super().forward(*args, **kwdargs)
             
@@ -136,7 +152,11 @@ Accelerating Transformers with Spectrum-Preserving Token Merging, NIPS'2024
     - code  (https://github.com/hchautran/PiToMe)
 """
 def pitome_apply_patch(
-   model: VisionTransformer, trace_source: bool = False, prop_attn: bool = False):
+    model: VisionTransformer, 
+    trace_source: bool = False, 
+    prop_attn: bool = False,
+    source_tracking_mode: str = 'matrix'
+):
 
     PiToMeVisionTransformer = make_tome_class(model.__class__)
 
@@ -145,12 +165,14 @@ def pitome_apply_patch(
     model._tome_info = {
         "r": model.r,
         "size": None,
-        "source": None,
+        "source_map": None,      # For 'map' mode
+        "source_matrix": None,   # For 'matrix' mode
         "total_merge": None,
         "trace_source": trace_source,
         "prop_attn": prop_attn,
         "class_token": getattr(model, 'cls_token', None) is not None,
         "distill_token": getattr(model, 'dist_token', None) is not None,
+        "source_tracking_mode": source_tracking_mode,
         # PiToMe hyperparameters
         "margin": [],
 

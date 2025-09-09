@@ -123,7 +123,8 @@ class DiffRateBlock(Block):
         self._tome_info["size"] = torch.gather(self._tome_info["size"], dim=1, index=idx.unsqueeze(-1))
         mask = torch.gather( mask, dim=1, index=idx)
         if self._tome_info["trace_source"]:
-            self._tome_info["source"] = torch.gather(self._tome_info["source"], dim=1, index=idx.unsqueeze(-1).expand(-1, -1, self._tome_info["source"].shape[-1]))
+            self._tome_info["source_matrix"] = torch.gather(self._tome_info["source_matrix"], 
+                                    dim=1, index=idx.unsqueeze(-1).expand(-1, -1, self._tome_info["source_matrix"].shape[-1]))
 
         
         if self.training:
@@ -162,7 +163,7 @@ class DiffRateBlock(Block):
             x = x[:, :prune_kept_num]
             self._tome_info["size"] = self._tome_info["size"][:, :prune_kept_num]
             if self._tome_info["trace_source"]:
-                self._tome_info["source"] = self._tome_info["source"][:, :prune_kept_num]
+                self._tome_info["source_matrix"] = self._tome_info["source_matrix"][:, :prune_kept_num]
                  
             # merging
             merge_kept_num = self.merge_ddp.kept_token_number
@@ -173,7 +174,7 @@ class DiffRateBlock(Block):
                 self._tome_info["size"] = torch.cat((self._tome_info["size"][:, :merge_kept_num], self._tome_info["size"][:, merge_kept_num:]*node_max[..., None] ),dim=1)
                 self._tome_info["size"] = merge(self._tome_info["size"], mode='sum')
                 if self._tome_info["trace_source"]:
-                    self._tome_info["source"] = merge(self._tome_info["source"], mode="amax")
+                    self._tome_info["source_matrix"] = merge(self._tome_info["source_matrix"], mode="amax")
 
             x = x + self._drop_path2(self.mlp(self.norm2(x)))
         return x
@@ -187,6 +188,7 @@ def make_tome_class(transformer_class):
             self._tome_info["mask"] =  torch.ones((B, self.patch_embed.num_patches + 1), device=x.device)
             self._tome_info["prune_kept_num"] = []
             self._tome_info["merge_kept_num"] = []
+            # TODO NOT FINISH YET.
             if self._tome_info["trace_source"]:
                 self._tome_info["source"] = torch.eye(self.patch_embed.num_patches + 1, 
                                                       device=x.device)[None, ...].expand(B, self.patch_embed.num_patches+1, self.patch_embed.num_patches+1)
@@ -298,7 +300,11 @@ Diffrate: Differentiable Compression Rate for Efficient Vision Transformers, ICC
     - code  (https://github.com/OpenGVLab/DiffRate)
 """
 def diffrate_apply_patch(
-    model: VisionTransformer, trace_source: bool = True, prune_granularity=1, merge_granularity=1
+    model: VisionTransformer, 
+    trace_source: bool = True, 
+    prune_granularity=1, 
+    merge_granularity=1,
+    source_tracking_mode: str = 'matrix'
 ):
     """
     Applies DiffRate to this transformer.
@@ -310,10 +316,12 @@ def diffrate_apply_patch(
     model._tome_info = {
         "size": None,
         "mask": None,           # only for training
-        "source": None,
+        "source_map": None,      # For 'map' mode
+        "source_matrix": None,   # For 'matrix' mode
         "trace_source": trace_source,
         "class_token": getattr(model, 'cls_token', None) is not None,
         "distill_token": getattr(model, 'dist_token', None) is not None,
+        "source_tracking_mode": source_tracking_mode,
     }
 
     block_index = 0

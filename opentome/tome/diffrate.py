@@ -98,6 +98,7 @@ def get_merge_func(metric: torch.Tensor, kept_number: int, class_token: bool = T
             similarity[..., :, 0] = -math.inf
         node_max, node_idx = similarity.max(dim=-1)
         dst_idx = node_idx[..., None]
+
     def merge(x: torch.Tensor, mode="mean", training=False) -> torch.Tensor:
         src = x[:,kept_number:]
         dst = x[:,:kept_number]
@@ -107,6 +108,7 @@ def get_merge_func(metric: torch.Tensor, kept_number: int, class_token: bool = T
             return torch.cat([dst, src], dim=1)
         else:
             return dst
+            
     return merge, node_max
 
 def uncompress(x, source):

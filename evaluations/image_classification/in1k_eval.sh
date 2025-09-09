@@ -9,8 +9,9 @@ tome=$2
 merge_num=$3
 dataset=$4
 gpus=$5
+mode=$6
 # Model name parameter with default value
-model_name=${6:-vit_base_patch16_224}
+model_name=${7:-vit_base_patch16_224}
 
 CUDA_VISIBLE_DEVICES=$cuda python -m torch.distributed.launch --nproc_per_node=$gpus \
 ./evaluations/image_classification/in1k_example.py \
@@ -19,4 +20,5 @@ CUDA_VISIBLE_DEVICES=$cuda python -m torch.distributed.launch --nproc_per_node=$
 --merge_num $merge_num \
 --dataset $dataset \
 --inflect -0.5 \
+--tracking_mode $mode \
 

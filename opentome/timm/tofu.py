@@ -4,7 +4,13 @@ from timm.models.vision_transformer import VisionTransformer
 from timm.models.vision_transformer import Attention as TimmAttention
 from timm.models.vision_transformer import Block as TimmBlock
 
-from opentome.tome.tome import bipartite_soft_matching, merge_source, merge_wavg, parse_r
+from opentome.tome.tome import (
+    bipartite_soft_matching,
+    merge_source_matrix,
+    merge_source_map,
+    merge_wavg,
+    parse_r,
+)
 from opentome.timm import Attention, Block
 
 
@@ -76,18 +82,26 @@ class ToFuBlock(Block):
         r = self._tome_info["r"].pop(0)
         if r > 0:
             # Apply ToMe here
-            merge, _ = bipartite_soft_matching(
+            merge, _, current_level_map = bipartite_soft_matching(
                 metric['metric'],
                 r,
                 self._tome_info["class_token"],
                 self._tome_info["distill_token"],
             )
+
             if self._tome_info["trace_source"]:
-                self._tome_info["source"] = merge_source(merge, x, self._tome_info["source"])
+                if self._tome_info["source_tracking_mode"] == 'map':
+                    source_map = self._tome_info["source_map"]
+                    # Initialize map on first run
+                    if source_map is None:
+                        b, t, _ = x.shape
+                        source_map = torch.arange(t, device=x.device, dtype=torch.long).expand(b, -1)
+                    self._tome_info["source_map"] = merge_source_map(current_level_map, x, source_map)
+                else: # 'matrix' mode
+                    source_matrix = self._tome_info["source_matrix"]
+                    self._tome_info["source_matrix"] = merge_source_matrix(merge, x, source_matrix)
                 
             x = merge(x, mode=self.strategy)
-
-        # print(r, x.shape, self.strategy)
 
         x = x + self._drop_path2(self.ls2(self.mlp(self.norm2(x))))
         return x
@@ -103,7 +117,8 @@ def make_tofme_class(transformer_class):
             self._tome_info["r"] = parse_r(
                 len(self.blocks), self.r, self._tome_info["total_merge"])
             self._tome_info["size"] = None
-            self._tome_info["source"] = None
+            self._tome_info["source_map"] = None
+            self._tome_info["source_matrix"] = None
 
             return super().forward(*args, **kwdargs)
 
@@ -115,7 +130,10 @@ Token Fusion: Bridging the Gap between Token Pruning and Token Merging, WACV'202
     - paper (https://arxiv.org/abs/2312.01026)
 """
 def tofu_apply_patch(
-   model: VisionTransformer, trace_source: bool = False, prop_attn: bool = True
+    model: VisionTransformer, 
+    trace_source: bool = False, 
+    prop_attn: bool = True, 
+    source_tracking_mode: str = 'map'
 ):
 
     ToFuVisionTransformer = make_tofme_class(model.__class__)
@@ -125,12 +143,14 @@ def tofu_apply_patch(
     model._tome_info = {
         "r": model.r,
         "size": None,
-        "source": None,
+        "source_map": None,      # For 'map' mode
+        "source_matrix": None,   # For 'matrix' mode
         "total_merge": None,
         "trace_source": trace_source,
         "prop_attn": prop_attn,
         "class_token": getattr(model, 'cls_token', None) is not None,
         "distill_token": getattr(model, 'dist_token', None) is not None,
+        "source_tracking_mode": source_tracking_mode,
     }
 
     if hasattr(model, "dist_token") and model.dist_token is not None:

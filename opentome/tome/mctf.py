@@ -11,6 +11,71 @@ import torch
 from .tome import do_nothing
 
 
+
+def _build_token_map_bidirectional(
+    n: int,
+    t_orig: int,
+    t1: int,
+    t2: int,
+    r1: int,
+    r2: int,
+    unm_idx: torch.Tensor,
+    src_idx: torch.Tensor,
+    dst_idx: torch.Tensor,
+    bidirection: bool,
+    device: torch.device,
+    dtype: torch.dtype,
+    unm_idx2: torch.Tensor = None,
+    src_idx2: torch.Tensor = None,
+    dst_idx2: torch.Tensor = None,
+) -> torch.Tensor:
+
+    num_unm = t1 - r1
+    t_new_inter = num_unm + t2
+    token_map_inter = torch.empty((n, t_orig), device=device, dtype=torch.long)
+
+    # a Merged tokens map to [0 .. num_unm-1]
+    unm_tokens_orig = (2 * unm_idx.squeeze(-1)).long()
+    unm_new_indices = torch.arange(num_unm, device=device).expand(n, -1)
+    token_map_inter.scatter_(1, unm_tokens_orig, unm_new_indices)
+
+    # All b (odd positions) map to [num_unm .. num_unm + t2 - 1]
+    dst_all_orig = torch.arange(1, t_orig, 2, device=device, dtype=torch.long).expand(n, -1)
+    dst_all_new_indices = torch.arange(num_unm, num_unm + t2, device=device).expand(n, -1)
+    token_map_inter.scatter_(1, dst_all_orig, dst_all_new_indices)
+
+    # a Merged tokens map to the middle index of their target b
+    src_tokens_orig = (2 * src_idx.squeeze(-1)).long()
+    dst_tokens_target_orig = (2 * dst_idx.squeeze(-1) + 1).long()
+    target_new_indices = torch.gather(token_map_inter, 1, dst_tokens_target_orig)
+    token_map_inter.scatter_(1, src_tokens_orig, target_new_indices)
+
+    # Intermediate to final
+    inter_to_final = torch.arange(t_new_inter, device=device, dtype=torch.long).expand(n, -1).clone()
+    if bidirection and r2 > 0:
+        # b Unmerged positions (sorted by unm_idx2)
+        pos_in_unm2 = torch.full((n, t2), -1, device=device, dtype=torch.long)
+        order_unm2 = torch.arange(t2 - r2, device=device).expand(n, -1)
+        pos_in_unm2.scatter_(1, unm_idx2.squeeze(-1), order_unm2)
+
+        # b Final indices: compact b in [num_unm .. num_unm + (t2 - r2) - 1]
+        final_idx_b = torch.where(
+            pos_in_unm2 >= 0,
+            num_unm + pos_in_unm2,
+            torch.zeros(1, device=device, dtype=torch.long).expand(n, t2),
+        )
+
+        # Merged b (src_idx2) map to their target a Unmerged positions (dst_idx2)
+        final_idx_b.scatter_(1, src_idx2.squeeze(-1), dst_idx2.squeeze(-1))
+
+        # Write back to the b segment of inter_to_final
+        inter_to_final[:, num_unm:num_unm + t2] = final_idx_b
+
+    # Combine: original -> intermediate -> final
+    token_map = inter_to_final.gather(1, token_map_inter)
+    return token_map
+
+
 def mctf_bipartite_soft_matching(
     metric: torch.Tensor,
     r: int,
@@ -22,7 +87,7 @@ def mctf_bipartite_soft_matching(
     tau_size: int=1,
     bidirection: int=True,
     size : torch.Tensor=None,
-) -> Tuple[Callable, Callable]:
+) -> Tuple[Callable, Callable, torch.Tensor]:
 
     protected = 0
     if class_token:
@@ -31,18 +96,21 @@ def mctf_bipartite_soft_matching(
         protected += 1
 
     # We can only reduce by a maximum of 50% tokens
-    t = metric.shape[1]
+    n, t = metric.shape[0], metric.shape[1]
     r = min(r, (t - protected) // 2)
 
+    # A simple do_nothing function for the r=0 case
+    do_nothing = lambda x, **_: x
+
     if r <= 0:
-        return do_nothing, do_nothing
+        identity_map = torch.arange(t, device=metric.device, dtype=torch.long).expand(n, -1)
+        return do_nothing, do_nothing, identity_map
 
     if bidirection:
         r1, r2 = r // 2, r - r // 2
     else:
         r1, r2 = r, 0
 
-    B, T, _ = metric.shape
     with torch.no_grad():
         metric = metric / metric.norm(dim=-1, keepdim=True)
         a, b = metric[..., ::2, :], metric[..., 1::2, :]
@@ -86,7 +154,9 @@ def mctf_bipartite_soft_matching(
             # Sort to ensure the class token is at the start
             unm_idx = unm_idx.sort(dim=1)[0]
 
-        #### bidirection:
+        #####################
+        #### Bidirection ####
+        #####################
         new_scores = scores.gather(dim=-2, index=unm_idx.repeat(1, 1, t2)).transpose(1, 2)
 
         node_max2, node_idx2 = new_scores.max(dim=-1)
@@ -95,6 +165,28 @@ def mctf_bipartite_soft_matching(
         unm_idx2 = edge_idx2[..., r2:, :]
         src_idx2 = edge_idx2[..., :r2, :]
         dst_idx2 = node_idx2[..., None].gather(dim=-2, index=src_idx2)
+
+        # Support token merged by map, instead of matrix
+        t_orig = t
+        t1 = a.shape[1]
+        t2 = b.shape[1]
+        token_map = _build_token_map_bidirectional(
+            n=n,
+            t_orig=t_orig,
+            t1=t1,
+            t2=t2,
+            r1=r1,
+            r2=r2,
+            unm_idx=unm_idx,
+            src_idx=src_idx,
+            dst_idx=dst_idx,
+            bidirection=bidirection,
+            device=metric.device,
+            dtype=metric.dtype,
+            unm_idx2=unm_idx2,
+            src_idx2=src_idx2,
+            dst_idx2=dst_idx2,
+        )
 
     def dim_match(src, dim=1, dim_num=5):
         while len(src.shape) < dim_num:
@@ -142,7 +234,7 @@ def mctf_bipartite_soft_matching(
 
         return out
 
-    return merge, unmerge
+    return merge, unmerge, token_map
 
 
 def mctf_merge_wavg(
