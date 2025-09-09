@@ -23,6 +23,9 @@ from opentome.tome.crossget import crossget_bipartite_soft_matching, cross_merge
 
 
 
+# TODO
+# We not finish it yet.
+
 class CrossGetAttention(Attention):
     """
     Modifications:

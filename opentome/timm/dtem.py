@@ -8,7 +8,13 @@ from timm.models.vision_transformer import Attention as TimmAttention
 from timm.models.vision_transformer import Block as TimmBlock
 from functools import partial
 
-from opentome.tome.tome import bipartite_soft_matching, merge_source, merge_wavg, parse_r, check_parse_r
+from opentome.tome.tome import (
+    bipartite_soft_matching,
+    merge_source_matrix,
+    merge_source_map,
+    merge_wavg,
+    parse_r,
+)
 from opentome.timm import Attention, Block
 
 
@@ -191,13 +197,22 @@ class DTEMBlock(Block):
         metric = metric['metric']
         metric = metric / metric.norm(dim=-1, keepdim=True)
 
-        merge, _ = bipartite_soft_matching(metric,
+        merge, _, current_level_map = bipartite_soft_matching(metric,
                                            r,
                                            self._tome_info["class_token"],
                                            self._tome_info["distill_token"],
                                            )
         if self._tome_info["trace_source"]:
-            self._tome_info["source"] = merge_source(merge, x, self._tome_info["source"])
+            if self._tome_info["source_tracking_mode"] == 'map':
+                source_map = self._tome_info["source_map"]
+                # Initialize map on first run
+                if source_map is None:
+                    b, t, _ = x.shape
+                    source_map = torch.arange(t, device=x.device, dtype=torch.long).expand(b, -1)        
+                self._tome_info["source_map"] = merge_source_map(current_level_map, x, source_map)
+            else: # 'matrix' mode
+                source_matrix = self._tome_info["source_matrix"]
+                self._tome_info["source_matrix"] = merge_source_matrix(merge, x, source_matrix)
 
         x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
         return x, self._tome_info["size"], x.size(1), None
@@ -219,7 +234,6 @@ class DTEMBlock(Block):
             r = self._tome_info["r"].pop(0)
             if size is not None and r > 0 and n > 0:
                 x, size, n, metric = self.merge(x, size, r, n, metric)
-            # print(r, x.shape)
             x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
             
             return x, size, n, metric
@@ -243,7 +257,8 @@ def make_tome_class(transformer_class):
                 len(self.blocks), self.r, self._tome_info["total_merge"]
             )
             self._tome_info["size"] = torch.ones_like(x[..., 0, None])
-            self._tome_info["source"] = None
+            self._tome_info["source_map"] = None
+            self._tome_info["source_matrix"] = None
 
             out_dicts = []
             for block in self.blocks:
@@ -270,7 +285,11 @@ Learning to Merge Tokens via Decoupled Embedding for Efficient Vision Transforme
     - code  (https://github.com/movinghoon/DTEM)
 """
 def dtem_apply_patch(
-    model: VisionTransformer, feat_dim=None, trace_source=True, prop_attn=True
+    model: VisionTransformer, 
+    feat_dim=None, 
+    trace_source=True, 
+    prop_attn=True,
+    source_tracking_mode: str = 'map'
 ):
     DTEMVisionTransformer = make_tome_class(model.__class__)
     model.__class__ = DTEMVisionTransformer
@@ -279,12 +298,14 @@ def dtem_apply_patch(
     model._tome_info = {
         "r": 0,
         "size": None,
-        "source": None,
+        "source_map": None,      # For 'map' mode
+        "source_matrix": None,   # For 'matrix' mode
         "total_merge": None,
         "trace_source": trace_source,
         "prop_attn": prop_attn,
         "class_token": getattr(model, 'cls_token', None) is not None,
         "distill_token": getattr(model, 'dist_token', None) is not None,
+        "source_tracking_mode": source_tracking_mode,
         # DTEM hyperparameters
         "k2": None,
         "tau1": None,

@@ -18,7 +18,11 @@ from timm.models.vision_transformer import VisionTransformer, LayerScale
 from timm.models.vision_transformer import Attention as TimmAttention
 from timm.models.vision_transformer import Block as TimmBlock
 
-from opentome.tome.tome import merge_source, parse_r
+from opentome.tome.tome import (
+    merge_source_matrix,
+    merge_source_map,
+    parse_r,
+)
 from opentome.tome.mctf import mctf_bipartite_soft_matching, mctf_merge_wavg
 from opentome.timm import Attention, Block
 
@@ -105,7 +109,7 @@ class MCTFBlock(Block):
         r = self._tome_info["r"].pop(0)
         if r > 0:
             # Apply ToMe here
-            merge, _ = mctf_bipartite_soft_matching(
+            merge, _, current_level_map = mctf_bipartite_soft_matching(
                             x_,
                             r,
                             class_token = self._tome_info["class_token"],
@@ -118,7 +122,16 @@ class MCTFBlock(Block):
                             bidirection = self._tome_info["bidirection"]
                         )
             if self._tome_info["trace_source"]:
-                self._tome_info["source"] = merge_source(merge, x, self._tome_info["source"])
+                if self._tome_info["source_tracking_mode"] == 'map':
+                    source_map = self._tome_info["source_map"]
+                    # Initialize map on first run
+                    if source_map is None:
+                        b, t, _ = x.shape
+                        source_map = torch.arange(t, device=x.device, dtype=torch.long).expand(b, -1)        
+                    self._tome_info["source_map"] = merge_source_map(current_level_map, x, source_map)
+                else: # 'matrix' mode
+                    source_matrix = self._tome_info["source_matrix"]
+                    self._tome_info["source_matrix"] = merge_source_matrix(merge, x, source_matrix)
             
             x, self._tome_info["size"], _ = mctf_merge_wavg(
                                                 merge, 
@@ -128,7 +141,6 @@ class MCTFBlock(Block):
                                                 one_step_ahead=self._tome_info["one_step_ahead"],
                                                 pooling_type=self._tome_info["pooling_type"]
                                             )
-        # print(r, x.shape)
         x = x + self._drop_path2(self.mlp(self.norm2(x)))
         return x
 
@@ -144,7 +156,8 @@ def make_tome_class(transformer_class):
             self._tome_info["r"] = parse_r(
                 len(self.blocks), self.r, self._tome_info["total_merge"])
             self._tome_info["size"] = None
-            self._tome_info["source"] = None
+            self._tome_info["source_map"] = None
+            self._tome_info["source_matrix"] = None
 
             return super().forward(*args, **kwdargs)
 
@@ -157,7 +170,10 @@ Multi-criteria Token Fusion with One-step-ahead Attention for Efficient Vision T
     - code  (https://github.com/mlvlab/MCTF)
 """
 def mctf_apply_patch(
-    model: VisionTransformer, trace_source: bool = True, prop_attn: bool = True
+    model: VisionTransformer, 
+    trace_source: bool = True, 
+    prop_attn: bool = True,
+    source_tracking_mode: str = 'map'
 ):
     """ Apply MCTF patch to a VisionTransformer model. 
         This modifies the model's class to MCTFVisionTransformer and updates the blocks and attention layers to MCTFBlock 
@@ -177,12 +193,14 @@ def mctf_apply_patch(
     model._tome_info = {
         "r": model.r,
         "size": None,
-        "source": None,
+        "source_map": None,      # For 'map' mode
+        "source_matrix": None,   # For 'matrix' mode
         "total_merge": None,
         "trace_source": trace_source,
         "prop_attn": prop_attn,
         "class_token": getattr(model, 'cls_token', None) is not None,
         "distill_token": getattr(model, 'dist_token', None) is not None,
+        "source_tracking_mode": source_tracking_mode,
         # MCFT hyperparameters
         "one_step_ahead": 1,
         "tau_sim": 1,

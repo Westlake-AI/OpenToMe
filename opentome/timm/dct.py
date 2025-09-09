@@ -55,8 +55,6 @@ class DCTBlock(Block):
                     class_token=self._tome_info["class_token"],
                     distill_token=self._tome_info["distill_token"],
                 )
-        # print(r, x.shape)
-
         return x
 
 
@@ -71,7 +69,8 @@ def make_tome_class(transformer_class):
             self._tome_info["r"] = parse_r(
                 len(self.blocks), self.r, self._tome_info["total_merge"])
             self._tome_info["size"] = None
-            self._tome_info["source"] = None
+            self._tome_info["source_map"] = None
+            self._tome_info["source_matrix"] = None
 
             return super().forward(*args, **kwdargs)
 
@@ -85,7 +84,10 @@ Fourier Transformer: Fast Long Range Modeling by Removing Sequence Redundancy wi
     - code  (https://github.com/LUMIA-Group/FourierTransformer)
 """
 def dct_apply_patch(
-    model: VisionTransformer, trace_source: bool = True, prop_attn: bool = True
+    model: VisionTransformer, 
+    trace_source: bool = True, 
+    prop_attn: bool = True,
+    source_tracking_mode: str = 'matrix'
 ):
 
     DCTVisionTransformer = make_tome_class(model.__class__)
@@ -96,12 +98,14 @@ def dct_apply_patch(
     model._tome_info = {
         "r": model.r,
         "size": None,
-        "source": None,
+        "source_map": None,      # For 'map' mode
+        "source_matrix": None,   # For 'matrix' mode
         "total_merge": None,
         "trace_source": trace_source,
         "prop_attn": prop_attn,
         "class_token": getattr(model, 'cls_token', None) is not None,
         "distill_token": getattr(model, 'dist_token', None) is not None,
+        "source_tracking_mode": source_tracking_mode,
     }
 
     if hasattr(model, "dist_token") and model.dist_token is not None:

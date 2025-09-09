@@ -35,6 +35,7 @@ def parse_args():
     parser.add_argument('--merge_ratio', type=float, default=None, help='the ratio of merge tokens in per layers')
     parser.add_argument('--inflect', type=float, default=-0.5, help='the inflect of merge ratio, default: -0.5')
     parser.add_argument('--save_vis', type=bool, default=True, help='whether to save the visualization of the merge tokens')
+    parser.add_argument('--tracking_mode', type=str, default='map', choices=['map', 'matrix'])
     # Dataset parameters
     parser.add_argument('--input_size', type=int, default=None, help='the input resolution')
     parser.add_argument('--dataset', type=str, default='data/ImageNet/val', help='the dataset to use for evaluation')
@@ -111,21 +112,22 @@ def evaluation(args):
             f'Model {args.model_name} loaded successfully., param count:{sum([m.numel() for m in model.parameters()])}')
 
     # build tome methods before ddp
+    stm = args.tracking_mode
     if args.tome.lower() in ['tome', 'tofu', 'crossget', 'dct', "pitome"]:
         if args.tome == 'tome':
-            tome.tome_apply_patch(model, trace_source=True)
+            tome.tome_apply_patch(model, trace_source=True, source_tracking_mode=stm)
         elif args.tome == 'tofu':
-            tofu.tofu_apply_patch(model, trace_source=True)
+            tofu.tofu_apply_patch(model, trace_source=True, source_tracking_mode=stm)
         elif args.tome == 'crossget':
             crossget.crossget_apply_patch(model, trace_source=True)
         elif args.tome == 'dct':
             dct.dct_apply_patch(model, trace_source=True)
         elif args.tome == 'pitome':
-            pitome.pitome_apply_patch(model, trace_source=True)
+            pitome.pitome_apply_patch(model, trace_source=True, source_tracking_mode=stm)
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support ToMe/ToFu/CrossGET. Please use a model that supports ToMe.")
     elif args.tome.lower() == 'dtem':
-        dtem.dtem_apply_patch(model, feat_dim=None)  # exteranal feature dim, defalut: none
+        dtem.dtem_apply_patch(model, feat_dim=None, source_tracking_mode=stm)  # exteranal feature dim, defalut: none
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support DTEM. Please use a model that supports DTEM.")
     elif args.tome.lower() == 'diffrate':
@@ -133,7 +135,7 @@ def evaluation(args):
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support DiffRate. Please use a model that supports DiffRate.")
     elif args.tome.lower() == 'mctf':
-        mctf.mctf_apply_patch(model)
+        mctf.mctf_apply_patch(model, source_tracking_mode=stm)
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support MCTF. Please use a model that supports MCTF.")
     elif args.tome.lower() == 'none':
