@@ -158,15 +158,15 @@ bash evaluations/visualizations/vis_eval.sh ./demo tome 100 1 deit_small_patch16
 
 | Method | Published | Support Source Matrix/Map | Support Visualization|
 |:------:|:---------:|:-------------------------:|:--------------------:|
-| ToMe   | ICLR’23   | Matrix, Map | [x] |
-| DiffRate | ICCV’23 | Matrix      | [x] |
-| DCT | ACL’23 | None | [ ] |
-| ToFu | WACV’24 | Matrix, Map | [x] |
-| MCTF | CVPR’24 | Matrix, Map | [x] |
-| ATC | ECCV’24 | Map | [ ] |
-| DTEM | NIPS’24 | Matrix, Map | [x] |
-| PiToMe | NIPS’24 | Matrix | [x] |
-| FPET | CVPR’25 | Matrix | [x] |
+| ToMe   | ICLR’23   | Matrix, Map | ✅ |
+| DiffRate | ICCV’23 | Matrix      | ✅ |
+| DCT | ACL’23 | None | ❌ |
+| ToFu | WACV’24 | Matrix, Map | ✅ |
+| MCTF | CVPR’24 | Matrix, Map | ✅ |
+| ATC | ECCV’24 | Map | ❌ |
+| DTEM | NIPS’24 | Matrix, Map | ✅ |
+| PiToMe | NIPS’24 | Matrix | ✅ |
+| FPET | CVPR’25 | Matrix | ✅ |
 
 ## Citation
 
