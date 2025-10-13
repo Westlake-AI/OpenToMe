@@ -8,7 +8,7 @@
 # timm: https://github.com/rwightman/pytorch-image-models/tree/master/timm
 # --------------------------------------------------------
 
-
+# ------ jinxin modified ------ #
 from typing import Tuple
 
 import torch
@@ -105,6 +105,7 @@ class PiToMeBlock(Block):
             # TODO We don't implements the 'map' yet.
             if self._tome_info["trace_source"]:
                 if self._tome_info["source_tracking_mode"] == 'map':
+                    raise ValueError("[BUG] We don't implements the 'map' yet.")
                     source_map = self._tome_info["source_map"]
                     # Initialize map on first run
                     if source_map is None:

@@ -7,6 +7,7 @@ cuda=$1
 tome=$2
 # Support multi round evaulation with different token merge, e.g. 144_98_46_10
 merge_num=$3
+# /liziqing/ImageNet/val
 dataset=$4
 gpus=$5
 mode=$6

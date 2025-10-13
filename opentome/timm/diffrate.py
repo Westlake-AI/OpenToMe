@@ -8,6 +8,7 @@
 # timm: https://github.com/rwightman/pytorch-image-models/tree/master/timm
 # --------------------------------------------------------
 
+# ------ jinxin modified ------ #
 from typing import Optional, Tuple
 import torch
 import torch.nn as nn
@@ -188,9 +189,12 @@ def make_tome_class(transformer_class):
             self._tome_info["mask"] =  torch.ones((B, self.patch_embed.num_patches + 1), device=x.device)
             self._tome_info["prune_kept_num"] = []
             self._tome_info["merge_kept_num"] = []
-            # TODO NOT FINISH YET.
+            # TODO. Not support source map yet.
             if self._tome_info["trace_source"]:
-                self._tome_info["source"] = torch.eye(self.patch_embed.num_patches + 1, 
+                if self._tome_info["source_tracking_mode"] == 'map':
+                    raise ValueError("[BUG] We don't implements the 'map' yet.")
+                else: # 'matrix' mode
+                    self._tome_info["source_matrix"] = torch.eye(self.patch_embed.num_patches + 1, 
                                                       device=x.device)[None, ...].expand(B, self.patch_embed.num_patches+1, self.patch_embed.num_patches+1)
             x = super().forward(x)
             if return_flop:

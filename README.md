@@ -135,13 +135,14 @@ bash evaluations/visualizations/vis_eval.sh ./demo tome 100 1 deit_small_patch16
 - [x] **ToMe [ICLR'23]** Token Merging: Your ViT but Faster [paper](https://arxiv.org/abs/2210.09461) [code](https://github.com/facebookresearch/ToMe)
 - [x] **DiffRate [ICCV'23]** Diffrate: Differentiable Compression Rate for Efficient Vision Transformers [paper](https://arxiv.org/abs/2305.17997) [code](https://github.com/OpenGVLab/DiffRate)
 - [x] **DCT [ACL'23]** Fourier Transformer: Fast Long Range Modeling by Removing Sequence Redundancy with FFT Operator [paper](https://arxiv.org/abs/2305.15099) [code](https://github.com/LUMIA-Group/FourierTransformer)
+- [ ] **LTMP [TMLR'23]** Learned Thresholds Token Merging and Pruning for Vision Transformers [paper](https://arxiv.org/pdf/2307.10780) [code](https://github.com/Mxbonn/ltmp)
 - [x] **ToFu [WACV'24]** Token Fusion: Bridging the Gap between Token Pruning and Token Merging [paper](https://arxiv.org/abs/2312.01026)
 - [ ] **CrossGET [ICML'24]** CrossGET: Cross-Guided Ensemble of Tokens for Accelerating Vision-Language Transformers [paper](https://arxiv.org/abs/2305.17455) [code](https://github.com/sdc17/CrossGET)
 - [x] **MCTF [CVPR'24]** Multi-criteria Token Fusion with One-step-ahead Attention for Efficient Vision Transformers [paper](https://arxiv.org/abs/2403.10030) [code](https://github.com/mlvlab/MCTF)
-- [ ] **ATC [ECCV'24]** [paper](https://arxiv.org/abs/2409.11923) [code](https://github.com/JoakimHaurum/ATC)
+- [x] **ATC [ECCV'24]** [paper](https://arxiv.org/abs/2409.11923) [code](https://github.com/JoakimHaurum/ATC)
 - [x] **DTEM [NeurIPS'24]** Learning to Merge Tokens via Decoupled Embedding for Efficient Vision Transformers [paper](https://openreview.net/forum?id=pVPyCgXv57) [code](https://github.com/movinghoon/DTEM)
 - [x] **PiToMe [NeurIPS'24]** Accelerating Transformers with Spectrum-Preserving Token Merging [paper](https://arxiv.org/abs/2405.16148) [code](https://github.com/hchautran/PiToMe)
-- [ ] **FPET [CVPR'25]** [paper](https://arxiv.org/abs/2503.20282) [code](https://github.com/kyk120/fpet)
+- [x] **FPET [CVPR'25]** Faster Parameter-Efficient Tuning with Token Redundancy Reduction [paper](https://arxiv.org/abs/2503.20282) [code](https://github.com/kyk120/fpet)
 
 ## Support Tasks (TODO List)
 
@@ -152,6 +153,20 @@ bash evaluations/visualizations/vis_eval.sh ./demo tome 100 1 deit_small_patch16
 - [x] Throughput
 - [ ] AI for Science
 - [x] ToMe Visualization
+
+## Summary Functions
+
+| Method | Published | Support Source Matrix/Map | Support Visualization|
+|:------:|:---------:|:-------------------------:|:--------------------:|
+| ToMe   | ICLR’23   | Matrix, Map | ✅ |
+| DiffRate | ICCV’23 | Matrix      | ✅ |
+| DCT | ACL’23 | None | ❌ |
+| ToFu | WACV’24 | Matrix, Map | ✅ |
+| MCTF | CVPR’24 | Matrix, Map | ✅ |
+| ATC | ECCV’24 | Map | ❌ |
+| DTEM | NIPS’24 | Matrix, Map | ✅ |
+| PiToMe | NIPS’24 | Matrix | ✅ |
+| FPET | CVPR’25 | Matrix | ✅ |
 
 ## Citation
 

@@ -5,6 +5,7 @@
 # timm: https://github.com/rwightman/pytorch-image-models/tree/master/timm
 # --------------------------------------------------------
 
+# ------ jinxin modified ------ #
 import numpy as np
 from typing import Callable, List, Tuple, Union
 import torch

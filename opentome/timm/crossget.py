@@ -8,6 +8,7 @@
 # timm: https://github.com/rwightman/pytorch-image-models/tree/master/timm
 # --------------------------------------------------------
 
+# ------ jinxin modified ------ #
 from typing import Tuple
 
 import torch

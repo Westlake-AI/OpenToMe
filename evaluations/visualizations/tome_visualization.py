@@ -18,7 +18,7 @@ from typing import List, Tuple
 import numpy as np
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
-from opentome.timm import tome, dtem, diffrate, tofu, mctf, crossget, dct, pitome
+from opentome.timm import tome, dtem, diffrate, tofu, mctf, crossget, dct, pitome, fpet
 from opentome.tome import tome as tm
 
 torch.backends.cudnn.benchmark = True
@@ -214,7 +214,7 @@ def main():
     assert args.merge_num >= 0, "Please specify a positive merge number."
     assert args.inflect in [-0.5, 1, 2], "Please specify a valid inflect value."
     stm = args.tracking_mode
-    if args.tome.lower() in ['tome', 'tofu', 'crossget', 'dct', "pitome"]:
+    if args.tome.lower() in ['tome', 'tofu', 'crossget', 'dct', 'pitome']:
         if args.tome == 'tome':
             tome.tome_apply_patch(model, trace_source=True, source_tracking_mode=stm)
         elif args.tome == 'tofu':
@@ -277,6 +277,11 @@ def main():
         model._tome_info["tau_size"] = 40
         model._tome_info["bidirection"] = True
         model._tome_info["pooling_type"] = 'none'
+    elif args.tome.lower() == 'fpet':
+        fpet.fpet_apply_patch(model, trace_source=True, source_tracking_mode=stm)
+        # raise ValueError("[TODO] We do not support FPET since the model.module not repalce successfully.")
+        if not hasattr(model, '_tome_info'):
+            raise ValueError("The model does not support FPET. Please use a model that supports FPET.")
     elif args.tome.lower() == 'none':
         pass
     else:
