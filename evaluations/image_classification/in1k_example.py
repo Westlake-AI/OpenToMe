@@ -16,8 +16,9 @@ import torch.distributed as dist
 from timm.utils import AverageMeter, reduce_tensor
 from torch.nn.parallel import DistributedDataParallel as DDP
 from tqdm import tqdm
-from opentome.timm import tome, dtem, diffrate, tofu, mctf, crossget, dct, pitome
+from opentome.timm import tome, dtem, diffrate, tofu, mctf, crossget, dct, pitome, fpet, atc
 from opentome.tome import tome as tm
+from opentome.tome.atc import atc_parse_r
 from opentome.utils import dataset_loader, accuracy
 
 torch.backends.cudnn.benchmark = False
@@ -113,7 +114,7 @@ def evaluation(args):
 
     # build tome methods before ddp
     stm = args.tracking_mode
-    if args.tome.lower() in ['tome', 'tofu', 'crossget', 'dct', "pitome"]:
+    if args.tome.lower() in ['tome', 'tofu', 'crossget', 'dct', 'pitome', 'fpet']:
         if args.tome == 'tome':
             tome.tome_apply_patch(model, trace_source=True, source_tracking_mode=stm)
         elif args.tome == 'tofu':
@@ -124,6 +125,8 @@ def evaluation(args):
             dct.dct_apply_patch(model, trace_source=True)
         elif args.tome == 'pitome':
             pitome.pitome_apply_patch(model, trace_source=True, source_tracking_mode=stm)
+        elif args.tome == 'fpet':
+            fpet.fpet_apply_patch(model, trace_source=True, source_tracking_mode=stm)
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support ToMe/ToFu/CrossGET. Please use a model that supports ToMe.")
     elif args.tome.lower() == 'dtem':
@@ -138,6 +141,10 @@ def evaluation(args):
         mctf.mctf_apply_patch(model, source_tracking_mode=stm)
         if not hasattr(model, '_tome_info'):
             raise ValueError("The model does not support MCTF. Please use a model that supports MCTF.")
+    elif args.tome.lower() == 'atc':
+        atc.atc_apply_patch(model, source_tracking_mode=stm, global_red=True)
+        if not hasattr(model, '_tome_info'):
+            raise ValueError("The model does not support ATC. Please use a model that supports ATC.")
     elif args.tome.lower() == 'none':
         pass
     else:
@@ -177,10 +184,25 @@ def evaluation(args):
 
     # Evaluation with various merge numbers
     logger.info('Start evaluation with args: {}'.format(args))
-    for merge_num in merge_list:
+    total_token = int((model.module.default_cfg["input_size"][1] / args.patch_size) ** 2)
+
+    # ------ 1. FPET only recude token in single layer & reduce a fixed number
+    if len(merge_list) > 1 and args.tome.lower() =='fpet':
+        merge_list = [total_token * 0.5]
+        logger.info("FPET only support reducing 50% tokens")
+
+    # ------ 2. ATC only reduce a fixed ratio
+    if args.tome.lower() =='atc':
+        atc_ratio = []
+        for i in range(len(merge_list)):
+            atc_ratio.append(float(merge_list[i] / total_token))
+        logger.info("ATC only support a fixed merge ratio")
+
+    
+    for i, merge_num in enumerate(merge_list):
         assert merge_num >= 0, "Please specify a positive merge number."
         assert args.inflect in [-0.5, 1, 2], "Please specify a valid inflect value."
-        if args.tome.lower() in ['tome', 'tofu', 'crossget', 'dct', "pitome"]:
+        if args.tome.lower() in ['tome', 'tofu', 'crossget', 'dct', 'pitome']:
             if args.merge_ratio is not None and merge_num is None:
                 merge_num = sum(tm.parse_r(len(model.module.blocks), r=(args.merge_ratio, args.inflect)))
             elif args.merge_ratio is None and merge_num is not None:
@@ -226,6 +248,18 @@ def evaluation(args):
             model.module._tome_info["bidirection"] = True
             model.module._tome_info["pooling_type"] = 'none'
             logger.info(model.module._tome_info)
+        elif args.tome.lower() == 'fpet':
+            logger.info(model.module._tome_info)
+        elif args.tome.lower() == 'atc':
+            model.module._tome_info["reduction_loc"] = [3, 6, 9]
+            model.module._tome_info["r"]= atc_parse_r(len(model.module.blocks), r=(args.merge_ratio, args.inflect), 
+                                                    total=total_token,
+                                                    offcial=True, location=model.module._tome_info["reduction_loc"], 
+                                                    ratio=atc_ratio[i]
+                                                )
+            model.module._tome_info["linkage"] = "average"
+            model.module._tome_info["total_tokens"] = total_token
+            model.module._tome_info["ratio"] = atc_ratio[i]
         elif args.tome.lower() == 'none':
             pass
 

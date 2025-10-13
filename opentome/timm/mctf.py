@@ -8,6 +8,7 @@
 # timm: https://github.com/rwightman/pytorch-image-models/tree/master/timm
 # --------------------------------------------------------
 
+# ------ jinxin modified ------ #
 from typing import Optional, Tuple
 import torch
 import torch.nn as nn
@@ -78,11 +79,6 @@ class MCTFAttention(Attention):
         )
 
         return x, metric
-
-        # if return_attn:
-        #     return x, attn_
-        # else:
-        #     return x, k.mean(dim=1)
 
 
 class MCTFBlock(Block):

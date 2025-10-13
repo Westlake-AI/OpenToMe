@@ -5,6 +5,8 @@ from .mctf import mctf_bipartite_soft_matching, mctf_merge_wavg
 from .dct import dc_matching
 from .diffrate import DiffRate, get_merge_func, tokentofeature, uncompress, ste_ceil, ste_min
 from .pitome import pitome, pitome_bipartite_soft_matching, pitome_vision, pitome_text
+from .fpet import fpet_bipartite_diff_matching
+from .atc import agglomerative_clustering
 
 __all__ = [
     "bipartite_soft_matching", "kth_bipartite_soft_matching", "random_bipartite_soft_matching",
@@ -13,5 +15,7 @@ __all__ = [
     "crossget_bipartite_soft_matching", "cross_merge_wavg",
     "dc_matching",
     "DiffRate", "get_merge_func", "uncompress", "tokentofeature", 'ste_ceil', 'ste_min',
-    "pitome", "pitome_bipartite_soft_matching", "pitome_vision", "pitome_text"
+    "pitome", "pitome_bipartite_soft_matching", "pitome_vision", "pitome_text",
+    "fpet_bipartite_diff_matching",
+    "agglomerative_clustering", "atc_parse_r"
 ]

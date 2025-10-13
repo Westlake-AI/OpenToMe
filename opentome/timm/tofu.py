@@ -1,3 +1,4 @@
+# ------ jinxin modified ------ #
 import torch
 from typing import Tuple
 from timm.models.vision_transformer import VisionTransformer
