@@ -364,7 +364,7 @@ def random_bipartite_soft_matching(
 def naive_local_bipartite_soft_matching(
     metric: torch.Tensor,
     r: int,
-    h: int,
+    window_size: int,
     class_token: bool = False,
     distill_token: bool = False,
 ) -> Tuple[Callable, Callable, torch.Tensor]:
@@ -405,7 +405,7 @@ def naive_local_bipartite_soft_matching(
         k_half = scores.shape[-1]
         row_idx = torch.arange(k_half, device=scores.device).view(1, -1)
         col_idx = torch.arange(k_half, device=scores.device).view(-1, 1)
-        dist_mask = torch.abs(row_idx - col_idx) > h
+        dist_mask = torch.abs(row_idx - col_idx) > window_size
         scores.masked_fill_(dist_mask, -math.inf)
         
         if class_token:
@@ -517,7 +517,7 @@ def naive_local_bipartite_soft_matching(
 def local_bipartite_soft_matching(
     metric: torch.Tensor,
     r: int,
-    h: int,
+    window_size: int,
     class_token: bool = False,
     distill_token: bool = False,
 ) -> Tuple[Callable, Callable, torch.Tensor]:
@@ -532,7 +532,7 @@ def local_bipartite_soft_matching(
         protected += 1
 
     n, t = metric.shape[0], metric.shape[1]
-    r = min(r, (t - protected) // 2, h-5)
+    r = min(r, (t - protected) // 2)
 
     if r <= 0:
         identity_map = torch.arange(t, device=metric.device, dtype=torch.long).expand(n, -1)
@@ -549,13 +549,14 @@ def local_bipartite_soft_matching(
 
         a, b = metric_for_match[..., ::2, :], metric_for_match[..., 1::2, :]
         B, N_half, C = a.shape
-        
-        local_scores = torch.zeros(B, N_half, 2 * h + 1, device=a.device, dtype=a.dtype)
-        padded_b = F.pad(b.transpose(-1, -2), (h, h), mode='replicate').transpose(-1, -2)
 
-        for i in range(2 * h + 1):
-            b_view = padded_b[:, i : i + N_half, :]
-            local_scores[:, :, i] = (a * b_view).sum(dim=-1)
+        # unfold-based local similarity computation
+        padded_b = F.pad(b, (0, 0, window_size, window_size))
+        b_windows_unfolded = padded_b.unfold(dimension=1, size=2 * window_size + 1, step=1)
+        # b_windows: [B, N_half, win, C]
+        b_windows = b_windows_unfolded.permute(0, 1, 3, 2)
+        a_reshaped = a.unsqueeze(2)  # [B, N_half, 1, C]
+        local_scores = (a_reshaped * b_windows).sum(dim=-1)
 
         if class_token:
             local_scores[:, 0, :] = -math.inf
@@ -564,7 +565,7 @@ def local_bipartite_soft_matching(
         
         # --- MODIFICATION: Clamp indices to prevent out-of-bounds error ---
         # Convert local indices to global indices
-        node_idx = torch.arange(N_half, device=a.device).view(1, -1) + local_node_idx - h
+        node_idx = torch.arange(N_half, device=a.device).view(1, -1) + local_node_idx - window_size
         # Clamp the indices to be within the valid range [0, N_half - 1]
         node_idx.clamp_(0, N_half - 1)
         # --- END OF MODIFICATION ---

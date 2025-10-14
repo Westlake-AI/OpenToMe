@@ -95,7 +95,7 @@ class ToMeBlock(Block):
 
         if r > 0:
             # --- NEW LOGIC: Select and apply the appropriate merge function ---
-            h = self._tome_info.get("h")
+            window_size = self._tome_info.get("window_size")
             use_naive_local = self._tome_info.get("use_naive_local", False)
             
             metric_val = metric['metric']
@@ -103,16 +103,16 @@ class ToMeBlock(Block):
             distill_token = self._tome_info["distill_token"]
 
             # If h is specified, use a local matching strategy
-            if h is not None and h >= 0:
+            if window_size is not None and window_size >= 0:
                 if use_naive_local:
                     # Use the naive (but clear) local implementation
                     merge, _, current_level_map = naive_local_bipartite_soft_matching(
-                        metric['metric'], r, h, self._tome_info["class_token"], self._tome_info["distill_token"]
+                        metric['metric'], r, window_size, self._tome_info["class_token"], self._tome_info["distill_token"]
                     )
                 else:
                     # Use the optimized local implementation
                     merge, _, current_level_map = local_bipartite_soft_matching(
-                        metric['metric'], r, h, self._tome_info["class_token"], self._tome_info["distill_token"]
+                        metric['metric'], r, window_size, self._tome_info["class_token"], self._tome_info["distill_token"]
                     )
             else:
                 # If h is not specified, fall back to the original global matching
@@ -168,34 +168,15 @@ def tome_apply_patch(
     model: VisionTransformer,
     trace_source: bool = True,
     prop_attn: bool = True,
-    h: Optional[int] = None,
+    window_size: Optional[int] = None,
     use_naive_local: bool = False,
     sparse: bool = False,
-    source_tracking_mode: str = 'map'
-):    
-    """
-    Applies ToMe to this transformer. Afterward, set r using model.r.
-    
-    MODIFIED to support local token merging.
-
-    Args:
-        model (VisionTransformer): The model to apply ToMe to.
-        trace_source (bool): If True, track the source of each token.
-        prop_attn (bool): If True, apply proportional attention.
-        h (Optional[int]): The locality parameter for merging. A token `a_i` can
-            only be merged with a token `b_j` if `|i - j| <= h`. If `None` or a
-            negative value, the original global merging is used.
-        use_naive_local (bool): If `h` is specified, this flag determines the
-            local merging implementation.
-            - If `False` (default), uses the memory and computationally efficient
-              `local_bipartite_soft_matching`.
-            - If `True`, uses `naive_local_bipartite_soft_matching`, which is
-              less efficient but easier to verify.
-    """
+    source_tracking_mode: str = 'map',
+    r: int = 2
+):
     ToMeVisionTransformer = make_tome_class(model.__class__)
-
     model.__class__ = ToMeVisionTransformer
-    model.r = 0
+    model.r = r
     model._tome_info = {
         "r": model.r,
         "size": None,
@@ -207,7 +188,7 @@ def tome_apply_patch(
         "class_token": getattr(getattr(model, 'module', model), 'cls_token', None) is not None,
         "distill_token": getattr(getattr(model, 'module', model), 'dist_token', None) is not None,
         "source_tracking_mode": source_tracking_mode,
-        "h": h,
+        "window_size": window_size,
         "use_naive_local": use_naive_local,
     }
 
@@ -218,5 +199,8 @@ def tome_apply_patch(
         if isinstance(module, (Block, TimmBlock)):
             module.__class__ = ToMeBlock
             module._tome_info = model._tome_info
+            # print("ToMeBlock")
+            # print(f"module._tome_info: {module._tome_info}")
         elif isinstance(module, (Attention, TimmAttention)):
             module.__class__ = ToMeAttention
+            module._tome_info = model._tome_info
