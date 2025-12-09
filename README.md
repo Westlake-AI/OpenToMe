@@ -22,6 +22,12 @@ cd OpenToMe
 pip install -e .
 ```
 
+## Developing
+
+### Install FLA (flash-linear-attention)
+Follow the [**flash-linear-attention**](https://github.com/fla-org/flash-linear-attention/blob/main/README.md), install the requested environment for training.
+
+
 ## Getting Started
 
 ### Model Examples
@@ -130,6 +136,64 @@ You can run the visualization with the bash example:
 bash evaluations/visualizations/vis_eval.sh ./demo tome 100 1 deit_small_patch16_224
 ```
 
+### Flash Linear Attention Model Training
+Here is an example of training with flash linear attention by [**flame**](https://github.com/fla-org/flame)
+```bash
+
+#!/usr/bin/bash
+export HF_ENDPOINT=https://hf-mirror.com
+
+NNODE=1 NGPU=8 LOG_RANK=0 bash train.sh \
+  --job.config_file flame/models/fla.toml \
+  --job.dump_folder RESULTS/PATH \
+  --model.config configs/gla_340M.json \
+  --model.tokenizer_path TOKENIZER/PATH \
+  --optimizer.name AdamW \
+  --optimizer.eps 1e-15 \
+  --optimizer.lr 3e-4 \
+  --lr_scheduler.warmup_steps 1024 \
+  --lr_scheduler.lr_min 0.1 \
+  --lr_scheduler.decay_type cosine \
+  --training.batch_size 32 \
+  --training.seq_len 2048 \
+  --training.gradient_accumulation_steps 1 \
+  --training.steps 20480 \
+  --training.max_norm 1.0 \
+  --training.skip_nan_inf \
+  --training.dataset DATASET/PATH \
+  --training.dataset_name default \
+  --training.dataset_split train \
+  --training.streaming \
+  --training.num_workers 32 \
+  --training.prefetch_factor 2 \
+  --training.seed 42 \
+  --training.compile \
+  --training.tensor_parallel_degree 1 \
+  --training.disable_loss_parallel \
+  --checkpoint.interval 2048 \
+  --checkpoint.load_step -1 \
+  --metrics.log_freq 1
+```
+
+### Evaluation of PPL and Common-sense Resaoning/QA
+The evaluation we follow up with the [**flash-linear-attention**](https://github.com/fla-org/flash-linear-attention/blob/main/README.md). Please confirm that the requirements for [**lmms-eval-harness**](https://github.com/EleutherAI/lm-evaluation-harness/blob/main/README.md?plain=1) are satisfied.
+
+Here is an example of PPL evaluation by GLA model.
+```bash
+#!/usr/bin/bash
+export HF_ENDPOINT=https://hf-mirror.com
+MODEL='MODEL/PATH'
+
+python -m harness --model hf \
+    --model_args pretrained=$MODEL,dtype=bfloat16 \
+    --tasks wikitext \
+    --batch_size 64 \
+    --num_fewshot 0 \
+    --device cuda \
+    --show_config
+```
+
+
 ## Token Compression Baselines
 
 - [x] **ToMe [ICLR'23]** Token Merging: Your ViT but Faster [paper](https://arxiv.org/abs/2210.09461) [code](https://github.com/facebookresearch/ToMe)
@@ -148,8 +212,9 @@ bash evaluations/visualizations/vis_eval.sh ./demo tome 100 1 deit_small_patch16
 
 - [x] Image Classification
 - [ ] Image Generation
-- [ ] M/LLM Inference 
-- [ ] Long Sequence
+- [ ] MLLM Inference
+- [x] LLM Inference 
+- [x] Long Sequence Training
 - [x] Throughput
 - [ ] AI for Science
 - [x] ToMe Visualization

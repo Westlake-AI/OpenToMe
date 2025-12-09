@@ -1,0 +1,12 @@
+#!/usr/bin/bash
+export HF_ENDPOINT=https://hf-mirror.com
+
+MODEL='/yuchang/lsy_jx/flash-linear-attention/examples/flame/exp/gla-340M-10B/batch1.seqlen32768.grad_acc2.warmup1024.update1.steps20480.lr3e-4'
+
+python -m harness --model hf \
+    --model_args pretrained=$MODEL,dtype=bfloat16 \
+    --tasks wikitext,lambada_openai,piqa,hellaswag,winogrande,arc_easy,arc_challenge,boolq,sciq,copa,openbookqa \
+    --batch_size 64 \
+    --num_fewshot 0 \
+    --device cuda \
+    --show_config

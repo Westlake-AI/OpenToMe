@@ -32,7 +32,7 @@ def parse_args():
     parser.add_argument('--model_name', type=str, default='vit_base_patch16_224', help='evaluation model name')
     parser.add_argument('--patch_size', type=int, default=16, help='model patch size')
     parser.add_argument('--tome', type=str, default='none', help='ToMe implementation to use, options: [tome, none]')
-    parser.add_argument('--merge_num', type=str, default='98', help='the number of merge tokens')
+    parser.add_argument('--merge_num', type=int, default='98', help='the number of merge tokens')
     parser.add_argument('--merge_ratio', type=float, default=None, help='the ratio of merge tokens in per layers')
     parser.add_argument('--inflect', type=float, default=-0.5, help='the inflect of merge ratio, default: -0.5')
     parser.add_argument('--save_vis', type=bool, default=True, help='whether to save the visualization of the merge tokens')
@@ -64,9 +64,6 @@ def evaluation(args):
 
     args = parse_args()
 
-    # Split String to list.
-    items = re.split(r'[_\-,.\s]+', args.merge_num)
-    merge_list = [int(item) for item in items if item.strip()] 
 
     # work_dir is determined in this priority: CLI > segment in file > filename
     if args.work_dir is not None:
@@ -152,10 +149,7 @@ def evaluation(args):
 
     # setup distributed training
     model = model.to(args.device)
-    if args.distributed:
-        if args.local_rank == 0:
-            logger.info("Using native Torch DistributedDataParallel.")
-        model = DDP(model, device_ids=[args.local_rank])
+
 
     if not osp.exists(args.dataset):
         logger.info(f"Error: Dataset path '{args.dataset}' does not exist.")
@@ -164,9 +158,9 @@ def evaluation(args):
         dataset_path=args.dataset,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
-        input_size=model.module.default_cfg["input_size"][1] if args.input_size is None else args.input_size,
-        mean=model.module.default_cfg["mean"],
-        std=model.module.default_cfg["std"],
+        input_size=model.default_cfg["input_size"][1] if args.input_size is None else args.input_size,
+        mean=model.default_cfg["mean"],
+        std=model.default_cfg["std"],
         return_dataset_only=True
     )
     sampler = torch.utils.data.DistributedSampler(
@@ -184,106 +178,108 @@ def evaluation(args):
 
     # Evaluation with various merge numbers
     logger.info('Start evaluation with args: {}'.format(args))
-    total_token = int((model.module.default_cfg["input_size"][1] / args.patch_size) ** 2)
+    total_token = int((model.default_cfg["input_size"][1] / args.patch_size) ** 2)
 
     # ------ 1. FPET only recude token in single layer & reduce a fixed number
-    if len(merge_list) > 1 and args.tome.lower() =='fpet':
-        merge_list = [total_token * 0.5]
+    if args.tome.lower() =='fpet':
+        args.merge_num = total_token * 0.5
         logger.info("FPET only support reducing 50% tokens")
 
     # ------ 2. ATC only reduce a fixed ratio
     if args.tome.lower() =='atc':
-        atc_ratio = []
-        for i in range(len(merge_list)):
-            atc_ratio.append(float(merge_list[i] / total_token))
+        atc_ratio = float(args.merge_num / total_token)
         logger.info("ATC only support a fixed merge ratio")
 
     
-    for i, merge_num in enumerate(merge_list):
-        assert merge_num >= 0, "Please specify a positive merge number."
-        assert args.inflect in [-0.5, 1, 2], "Please specify a valid inflect value."
-        if args.tome.lower() in ['tome', 'tofu', 'crossget', 'dct', 'pitome']:
-            if args.merge_ratio is not None and merge_num is None:
-                merge_num = sum(tm.parse_r(len(model.module.blocks), r=(args.merge_ratio, args.inflect)))
-            elif args.merge_ratio is None and merge_num is not None:
-                merge_ratio = tm.check_parse_r(len(model.module.blocks), merge_num, 
-                                        (model.module.default_cfg["input_size"][1] / args.patch_size) ** 2, args.inflect)
-            # update _tome_info
-            model.module.r = (merge_ratio, args.inflect)
-            model.module._tome_info["r"] = model.module.r
-            model.module._tome_info["total_merge"] = merge_num
-            logger.info(model.module._tome_info)
-        elif args.tome.lower() == 'dtem':
-            if args.merge_ratio is not None and merge_num is None:
-                merge_num = sum(tm.parse_r(len(model.module.blocks), r=(args.merge_ratio, args.inflect)))
-            elif args.merge_ratio is None and merge_num is not None:
-                merge_ratio = tm.check_parse_r(len(model.module.blocks), merge_num, 
-                                        (model.module.default_cfg["input_size"][1]/args.patch_size) ** 2, args.inflect)
-            # update _tome_info
-            model.module.r = (merge_ratio, args.inflect)
-            model.module._tome_info["r"] = model.module.r
-            model.module._tome_info["k2"] = 3
-            model.module._tome_info["tau1"] = 0.1
-            model.module._tome_info["tau2"] = 0.1
-            model.module._tome_info["total_merge"] = merge_num
-            logger.info(model.module._tome_info)
-        elif args.tome.lower() == 'diffrate':
-            r = merge_num / len(model.module.blocks) if merge_num is not None else 0
-            model.module.init_kept_num_using_r(int(r))
-            logger.info(model.module._tome_info)
-        elif args.tome.lower() == 'mctf':
-            if args.merge_ratio is not None and merge_num is None:
-                merge_num = sum(tm.parse_r(len(model.module.blocks), r=(args.merge_ratio, args.inflect)))
-            elif args.merge_ratio is None and merge_num is not None:
-                merge_ratio = tm.check_parse_r(len(model.module.blocks), merge_num, 
-                                        (model.module.default_cfg["input_size"][1]/args.patch_size) ** 2, args.inflect)
-            # update _tome_info
-            model.module.r = (merge_ratio, args.inflect)
-            model.module._tome_info["r"] = model.module.r
-            model.module._tome_info["total_merge"] = merge_num
-            model.module._tome_info["one_step_ahead"] = 1
-            model.module._tome_info["tau_sim"] = 1
-            model.module._tome_info["tau_info"] = 20
-            model.module._tome_info["tau_size"] = 40
-            model.module._tome_info["bidirection"] = True
-            model.module._tome_info["pooling_type"] = 'none'
-            logger.info(model.module._tome_info)
-        elif args.tome.lower() == 'fpet':
-            logger.info(model.module._tome_info)
-        elif args.tome.lower() == 'atc':
-            model.module._tome_info["reduction_loc"] = [3, 6, 9]
-            model.module._tome_info["r"]= atc_parse_r(len(model.module.blocks), r=(args.merge_ratio, args.inflect), 
-                                                    total=total_token,
-                                                    offcial=True, location=model.module._tome_info["reduction_loc"], 
-                                                    ratio=atc_ratio[i]
-                                                )
-            model.module._tome_info["linkage"] = "average"
-            model.module._tome_info["total_tokens"] = total_token
-            model.module._tome_info["ratio"] = atc_ratio[i]
-        elif args.tome.lower() == 'none':
-            pass
+    assert args.merge_num >= 0, "Please specify a positive merge number."
+    assert args.inflect in [-0.5, 1, 2], "Please specify a valid inflect value."
+    if args.tome.lower() in ['tome', 'tofu', 'crossget', 'dct', 'pitome']:
+        if args.merge_ratio is not None and args.merge_num is None:
+            args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, args.inflect)))
+        elif args.merge_ratio is None and args.merge_num is not None:
+            merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
+                                    (model.default_cfg["input_size"][1] / args.patch_size) ** 2, args.inflect)
+        # update _tome_info
+        model.r = (merge_ratio, args.inflect)
+        model._tome_info["r"] = model.r
+        model._tome_info["total_merge"] = args.merge_num
+        logger.info(model._tome_info)
+    elif args.tome.lower() == 'dtem':
+        if args.merge_ratio is not None and args.merge_num is None:
+            args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, args.inflect)))
+        elif args.merge_ratio is None and args.merge_num is not None:
+            merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
+                                    (model.default_cfg["input_size"][1]/args.patch_size) ** 2, args.inflect)
+        # update _tome_info
+        model.r = (merge_ratio, args.inflect)
+        model._tome_info["r"] = model.r
+        model._tome_info["k2"] = 3
+        model._tome_info["tau1"] = 0.1
+        model._tome_info["tau2"] = 0.1
+        model._tome_info["total_merge"] = args.merge_num
+        logger.info(model._tome_info)
+    elif args.tome.lower() == 'diffrate':
+        r = args.merge_num / len(model.blocks) if args.merge_num is not None else 0
+        model.init_kept_num_using_r(int(r))
+        logger.info(model._tome_info)
+    elif args.tome.lower() == 'mctf':
+        if args.merge_ratio is not None and args.merge_num is None:
+            args.merge_num = sum(tm.parse_r(len(model.blocks), r=(args.merge_ratio, args.inflect)))
+        elif args.merge_ratio is None and args.merge_num is not None:
+            merge_ratio = tm.check_parse_r(len(model.blocks), args.merge_num, 
+                                    (model.default_cfg["input_size"][1]/args.patch_size) ** 2, args.inflect)
+        # update _tome_info
+        model.r = (merge_ratio, args.inflect)
+        model._tome_info["r"] = model.r
+        model._tome_info["total_merge"] = args.merge_num
+        model._tome_info["one_step_ahead"] = 1
+        model._tome_info["tau_sim"] = 1
+        model._tome_info["tau_info"] = 20
+        model._tome_info["tau_size"] = 40
+        model._tome_info["bidirection"] = True
+        model._tome_info["pooling_type"] = 'none'
+        logger.info(model._tome_info)
+    elif args.tome.lower() == 'fpet':
+        logger.info(model._tome_info)
+    elif args.tome.lower() == 'atc':
+        model._tome_info["reduction_loc"] = [3, 6, 9]
+        model._tome_info["r"]= atc_parse_r(len(model.blocks), r=(args.merge_ratio, args.inflect), 
+                                                total=total_token,
+                                                offcial=True, location=model._tome_info["reduction_loc"], 
+                                                ratio=atc_ratio
+                                            )
+        model._tome_info["linkage"] = "average"
+        model._tome_info["total_tokens"] = total_token
+        model._tome_info["ratio"] = atc_ratio
+    elif args.tome.lower() == 'none':
+        pass
 
-        # summarize the results
-        top1 = AverageMeter()
-        top5 = AverageMeter()
+    # summarize the results
+    top1 = AverageMeter()
+    top5 = AverageMeter()
 
-        model.eval()
-        with torch.no_grad():
-            for images, labels in tqdm(val_loader, desc="Evaluating"):
-                images, labels = images.to(args.device), labels.to(args.device)
-                outputs = model(images)
-                results = accuracy.accuracy_one_hot(outputs, labels, (1, 5))
+    if args.distributed:
+        if args.local_rank == 0:
+            logger.info("Using native Torch DistributedDataParallel.")
+        model = DDP(model, device_ids=[args.local_rank])
 
-                if args.distributed:
-                    acc1 = reduce_tensor(results[0], args.world_size)
-                    acc5 = reduce_tensor(results[-1], args.world_size)
-                torch.cuda.synchronize()
+    model.eval()
+    with torch.no_grad():
+        for images, labels in tqdm(val_loader, desc="Evaluating"):
+            images, labels = images.to(args.device), labels.to(args.device)
+            outputs = model(images)
+            results = accuracy.accuracy_one_hot(outputs, labels, (1, 5))
 
-                top1.update(acc1.item(), outputs.size(0))
-                top5.update(acc5.item(), outputs.size(0))
-            
-            if args.rank == 0:
-                logger.info(f"Final accuracy: Top-1: {top1.avg}%, Top-5: {top5.avg}%")
+            if args.distributed:
+                acc1 = reduce_tensor(results[0], args.world_size)
+                acc5 = reduce_tensor(results[-1], args.world_size)
+            torch.cuda.synchronize()
+
+            top1.update(acc1.item(), outputs.size(0))
+            top5.update(acc5.item(), outputs.size(0))
+        
+        if args.rank == 0:
+            logger.info(f"Final accuracy: Top-1: {top1.avg}%, Top-5: {top5.avg}%")
 
     cleanup()
 

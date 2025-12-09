@@ -113,7 +113,7 @@ def vis_eval(model_ddp, work_dir, args):
             image_dir = '.'
 
     # 2. 获取所有图片文件（支持常见图片格式）
-    img_exts = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tif', '*.tiff', '*.webp']
+    img_exts = ['*.jpg', '*.jpeg', '*.png', '*.bmp', '*.tif', '*.tiff', '*.webp', '*.JPEG']
     img_files = []
     for ext in img_exts:
         img_files.extend(glob.glob(osp.join(image_dir, ext)))
@@ -164,7 +164,7 @@ def parse_args():
     parser.add_argument('--merge_ratio', type=float, default=None, help='the ratio of merge tokens in per layers')
     parser.add_argument('--inflect', type=float, default=-0.5, help='the inflect of merge ratio, default: -0.5')
     parser.add_argument('--save_vis', type=bool, default=True, help='whether to save the visualization of the merge tokens')
-    parser.add_argument('--tracking_mode', type=str, default='map', choices=['map', 'matrix'])
+    parser.add_argument('--tracking_mode', type=str, default='matrix', choices=['map', 'matrix'])
     # Environment parameters
     parser.add_argument('--work_dir', type=str, default='results/visualization', help='the dir to save logs and models')
     parser.add_argument('--gpu_id', type=int, default=0, help='id of gpu to use ' '(only applicable to non-distributed testing)')
