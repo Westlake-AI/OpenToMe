@@ -4,7 +4,6 @@ lpips==0.1.4
 omegaconf
 PyYAML==6.0.2
 requests
-
 torchmetrics
-
 timm==0.9.11
+scikit-learn
