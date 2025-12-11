@@ -10,12 +10,6 @@ import time
 from datetime import timedelta
 
 import fla  # noqa
-
-# ------ jinxin added ------ #
-# import fla.models.gated_deltanet
-import fla.models.delta_net
-# import fla.models.gla
-
 import torch
 from fla.modules.fused_linear_cross_entropy import FusedLinearCrossEntropyLoss
 from fla.ops.utils import prepare_position_ids
@@ -34,6 +28,23 @@ from torchtitan.tools import utils
 from torchtitan.tools.logging import init_logger, logger
 from torchtitan.tools.profiling import maybe_enable_memory_snapshot, maybe_enable_profiling
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+
+# ------ jinxin added ------ #
+backbone = os.environ.get("BACKBONE", None)
+print("*" * 50)
+if "gated_deltanet" in backbone:
+    print("Gated-DeltaNet")
+    import fla.models.gated_deltanet
+elif "delta_net" in backbone:
+    print("DeltaNet")
+    import fla.models.delta_net
+elif "gla" in backbone:
+    print("GLA")
+    import fla.models.gla
+else:
+    print("None")
+print("*" * 50)
 
 from flame.components.checkpoint import TrainState
 from flame.config_manager import JobConfig
