@@ -44,7 +44,20 @@ from lm_eval.models.utils import (
 )
 
 # ------ jinxin added ------ #
-import fla.models.gla
+backbone = os.environ.get("BACKBONE", None)
+print("*" * 50)
+if "gated_deltanet" in backbone:
+    print("Gated-DeltaNet")
+    import fla.models.gated_deltanet
+elif "delta_net" in backbone:
+    print("DeltaNet")
+    import fla.models.delta_net
+elif "gla" in backbone:
+    print("GLA")
+    import fla.models.gla
+else:
+    print("None")
+print("*" * 50)
 
 if TYPE_CHECKING:
     from transformers.quantizers.auto import AutoQuantizationConfig
