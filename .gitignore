@@ -119,3 +119,4 @@ data
 *.log.json
 work_dirs
 results
+output

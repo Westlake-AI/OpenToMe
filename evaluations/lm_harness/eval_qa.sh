@@ -1,7 +1,7 @@
 #!/usr/bin/bash
 export HF_ENDPOINT=https://hf-mirror.com
 
-MODEL='/yuchang/lsy_jx/flash-linear-attention/examples/flame/exp/gla-340M-10B/batch1.seqlen32768.grad_acc2.warmup1024.update1.steps20480.lr3e-4'
+MODEL='/yuchang/lsy_jx/flash-linear-attention/examples/flame/exp/gated_deltanet_340M-100B'
 
 python -m harness --model hf \
     --model_args pretrained=$MODEL,dtype=bfloat16 \

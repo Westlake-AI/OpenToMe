@@ -40,6 +40,7 @@ class ToMeAttention(Attention):
         self, x: torch.Tensor, size: torch.Tensor = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Note: this is copied from timm.models.vision_transformer.Attention with modifications.
+        # print("test")
         B, N, C = x.shape
         qkv = (self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads
                                    ).permute(2, 0, 3, 1, 4))
