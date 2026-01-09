@@ -31,20 +31,36 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 
 # ------ jinxin added ------ #
-backbone = os.environ.get("BACKBONE", None)
+backbone = os.environ.get("BACKBONE", "None")
 print("*" * 50)
 if "gated_deltanet" in backbone:
     print("Gated-DeltaNet")
-    import fla.models.gated_deltanet
+    import opentome.models.gated_deltanet
 elif "delta_net" in backbone:
     print("DeltaNet")
-    import fla.models.delta_net
+    import opentome.models.delta_net
 elif "gla" in backbone:
     print("GLA")
-    import fla.models.gla
+    import opentome.models.gla
+elif "transformer++" in backbone:
+    print("Transformer++")
+    import opentome.models.transformer
+elif "qwen3_next" in backbone:
+    print("Qwen3-NeXt")
+    import opentome.models.qwen3_next
+elif "blt" in backbone:
+    print("BLT")
+    import opentome.models.blt
 else:
     print("None")
+tokenizer_name = os.environ.get("TOKENIZER_NAME", "default")
+print(f"Tokenizer name: {tokenizer_name}")
 print("*" * 50)
+
+# from ipdb import set_trace as point
+from opentome.tokenizer.build_tokenizer import TokenizerArgs
+
+# ------ End of jinxin added ------ #
 
 from flame.components.checkpoint import TrainState
 from flame.config_manager import JobConfig
@@ -155,12 +171,26 @@ def main(job_config: JobConfig):
     train_spec = get_train_spec(job_config.model.name)
 
     logger.info("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(
-        job_config.model.tokenizer_path,
-        trust_remote_code=True,
-        model_max_length=int(1e10),
-    )
-    logger.info(f"{tokenizer}")
+    # ------ jinxin ------ #
+    if tokenizer_name =="default":
+        tokenizer = AutoTokenizer.from_pretrained(
+            job_config.model.tokenizer_path,
+            trust_remote_code=True,
+            model_max_length=int(1e10),
+        )
+        logger.info(f"{tokenizer}")
+    else:
+        assert tokenizer_name in ["bytes", "sentencepiece", "tiktoken", "blt"], f"Invalid tokenizer name: {tokenizer_name}"
+        tokenizer = TokenizerArgs(
+            name=tokenizer_name,
+            init_kwargs={
+                "vocab_size_unit_1": 256,
+                "bpe_delim": False,
+                "bpe_tokenizer_path": job_config.model.tokenizer_path,
+                "add_bos": True,
+                "add_eos": True,
+            }
+        ).build()
     logger.info(
         f"Loading dataset {job_config.training.dataset}"
         f":{job_config.training.dataset_name}"
@@ -220,11 +250,17 @@ def main(job_config: JobConfig):
                 f"{color.reset}"
             )
             model_config.fuse_linear_cross_entropy = False
-    model_config.vocab_size = max(tokenizer.vocab_size, model_config.vocab_size)
 
+    # ------ jinxin ------ #
+    if tokenizer_name =="default":
+        model_config.vocab_size = max(tokenizer.vocab_size, model_config.vocab_size)
+    else:
+        assert tokenizer_name in ["bytes", "sentencepiece", "tiktoken", "blt"], f"Invalid tokenizer name: {tokenizer_name}"
+        model_config.vocab_size = tokenizer.get_vocab_size()
     logger.info(
         f"Building model from the config\n{color.green}{model_config}{color.reset}"
     )
+    # ------ Modeling ------ #
     with torch.device("meta"):
         model = AutoModelForCausalLM.from_config(model_config)
         if (
@@ -504,7 +540,7 @@ def main(job_config: JobConfig):
                 else:
                     # Non-PP forward / backward
                     with train_context(optional_context_parallel_ctx):
-                        with maybe_enable_amp:
+                        with maybe_enable_amp:   # --- jinxin --- #
                             output = model(
                                 input_ids=input_ids,
                                 labels=labels,

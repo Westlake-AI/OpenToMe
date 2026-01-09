@@ -21,6 +21,34 @@ else:
     CacheLayerMixin = object
 
 
+from typing import Any, Optional, TypedDict
+import torch
+from contextlib import nullcontext
+
+
+def maybe_autocast(
+    device_type: str,
+    dtype: Optional["_dtype"] = None,
+    enabled: bool = True,
+    cache_enabled: Optional[bool] = None,
+):
+    """
+    Context manager that only autocasts if:
+
+    - `autocast` is already enabled in this context
+    - Or this call to `maybe_autocast` has `enabled=True`
+
+    This prevents `autocast` being added to the graph when it is effectively a no-op.
+    Which makes graph splitting in `torch.compile` more flexible as it removes the
+    requirement that partition IDs be monotonically increasing.
+    """
+    if torch.is_autocast_enabled(device_type) or enabled:
+        return torch.autocast(device_type, dtype=dtype, enabled=enabled, cache_enabled=cache_enabled)
+    else:
+        return nullcontext()
+    
+    
+
 class FLALayer(CacheLayerMixin):
     is_compileable = True
     is_sliding = False

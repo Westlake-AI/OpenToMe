@@ -42,36 +42,7 @@ from timm.utils import ApexScaler, NativeScaler
 from fvcore.nn import FlopCountAnalysis
 from fvcore.nn import flop_count_table
 
-from opentome.models.transformer_archieve_yukai.model import HybridToMeModel
-from torch.distributed.elastic.multiprocessing.errors import record
-from timm.models._registry import register_model
-
-# Register custom models to timm
-@register_model
-def hybridtomevit_base(pretrained=False, **kwargs):
-    """HybridToMe ViT Base model"""
-    model = HybridToMeModel(
-        img_size=kwargs.get('img_size', 224),
-        patch_size=16,
-        embed_dim=768,
-        num_heads=12,
-        mlp_ratio=4.0,
-        dtem_feat_dim=64,
-        local_depth=4,
-        latent_depth=8,
-        tome_use_naive_local=False,
-        num_classes=kwargs.get('num_classes', 1000),
-        dtem_window_size=kwargs.get('dtem_window_size', None),
-        dtem_r=kwargs.get('dtem_r', 2),
-        dtem_t=kwargs.get('dtem_t', 1),
-        total_merge_local=kwargs.get('total_merge_local', 16),
-        total_merge_latent=kwargs.get('total_merge_latent', 8),
-        use_softkmax=kwargs.get('use_softkmax', False),
-        use_cross_attention=kwargs.get('use_cross_attention', False),
-        num_local_blocks=kwargs.get('num_local_blocks', 1),
-        local_block_window=kwargs.get('local_block_window', 16),
-    )
-    return model
+from opentome.models.mergenet.model import HybridToMeModel
 
 try:
     from apex import amp
@@ -166,10 +137,6 @@ parser.add_argument("--total_merge_local", type=int, default=8,
                     help="Total number of local tokens to merge.")
 parser.add_argument("--total_merge_latent", type=int, default=4,
                     help="Total number of latent tokens to merge.")
-parser.add_argument("--use_softkmax", action='store_true', default=False,
-                    help="Use softkmax in the model.")
-parser.add_argument("--use_cross_attention", action='store_true', default=False,
-                    help="Use cross attention in the model.")
 
 # Optimizer parameters
 parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
@@ -365,7 +332,7 @@ def _parse_args():
     args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
     return args, args_text
 
-@record
+
 def main():
     setup_default_logging()
     args, args_text = _parse_args()
@@ -419,8 +386,6 @@ def main():
         dtem_t=args.dtem_t,
         total_merge_local=args.total_merge_local, 
         total_merge_latent=args.total_merge_latent,
-        use_softkmax=args.use_softkmax,
-        use_cross_attention=args.use_cross_attention,
         )
     if args.num_classes is None:
         assert hasattr(model, 'num_classes'), 'Model must have `num_classes` attr if not set on cmd line/config.'
@@ -446,14 +411,6 @@ def main():
     model.cuda()
     if args.channels_last:
         model = model.to(memory_format=torch.channels_last)
-
-    # Initialize DTEM hyperparameters for numerical stability
-    if hasattr(model, 'local') and hasattr(model.local, 'vit'):
-        model.local.vit._tome_info["k2"] = 4
-        model.local.vit._tome_info["tau1"] = 1.0
-        model.local.vit._tome_info["tau2"] = 10
-        if args.local_rank == 0:
-            _logger.info("DTEM hyperparameters initialized: k2=4, tau1=1.0, tau2=10")
 
     # setup synchronized BatchNorm for distributed training
     # model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -520,13 +477,11 @@ def main():
             # Apex DDP preferred unless native amp is activated
             if args.local_rank == 0:
                 _logger.info("Using NVIDIA APEX DistributedDataParallel.")
-            model = ApexDDP(model, delay_allreduce=True, find_unused_parameters=True)
+            model = ApexDDP(model, delay_allreduce=True)
         else:
             if args.local_rank == 0:
                 _logger.info("Using native Torch DistributedDataParallel.")
-            # ---- here ---- #
-            model = NativeDDP(model, device_ids=[args.local_rank], broadcast_buffers=not args.no_ddp_bb,
-                            find_unused_parameters=True)
+            model = NativeDDP(model, device_ids=[args.local_rank], broadcast_buffers=not args.no_ddp_bb)
         # NOTE: EMA model does not need to be wrapped by DDP
 
     # setup learning rate schedule and starting epoch
@@ -748,6 +703,7 @@ def train_one_epoch(epoch: int,
     losses_m = AverageMeter()
 
     model.train()
+    print(model)
     all_entropy = []
 
     end = time.time()
@@ -764,7 +720,7 @@ def train_one_epoch(epoch: int,
             input = input.contiguous(memory_format=torch.channels_last)
 
         with amp_autocast():
-            output, aux = model(input)
+            output, _ = model(input)
             loss = loss_fn(output, target)
             if torch.any(torch.isnan(loss)) or torch.any(torch.isinf(loss)):
                 raise ValueError("Inf or nan loss value: use fp32 training instead!")

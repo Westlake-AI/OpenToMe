@@ -55,6 +55,9 @@ elif "delta_net" in backbone:
 elif "gla" in backbone:
     print("GLA")
     import fla.models.gla
+elif "transformer" in backbone:
+    print("Transformer++")
+    import fla.models.transformer
 else:
     print("None")
 print("*" * 50)
