@@ -48,16 +48,16 @@ backbone = os.environ.get("BACKBONE", None)
 print("*" * 50)
 if "gated_deltanet" in backbone:
     print("Gated-DeltaNet")
-    import opentome.models.gated_deltanet
+    import fla.models.gated_deltanet
 elif "delta_net" in backbone:
     print("DeltaNet")
-    import opentome.models.delta_net
+    import fla.models.delta_net
 elif "gla" in backbone:
     print("GLA")
-    import opentome.models.gla
-elif "transformer++" in backbone:
+    import fla.models.gla
+elif "transformer" in backbone:
     print("Transformer++")
-    import opentome.models.transformer
+    import fla.models.transformer
 else:
     print("None")
 print("*" * 50)
