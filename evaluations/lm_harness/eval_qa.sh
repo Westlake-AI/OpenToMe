@@ -1,11 +1,10 @@
 #!/usr/bin/bash
 export HF_ENDPOINT=https://hf-mirror.com
 
-export BACKBONE=delta_net
+export BACKBONE=gated_deltanet
 echo $BACKBONE
 
-# MODEL='/yuchang/lsy_jx/flash-linear-attention/examples/flame/exp/gla-340M-10B/batch1.seqlen32768.grad_acc2.warmup1024.update1.steps20480.lr3e-4'
-MODEL='/yuchang/lsy_jx/OpenToMe_archieve/trainer/flame/exp/delta_net_340M-10B/batch1.seqlen32768.grad_acc2.warmup1024.update1.steps20480.lr3e-4'
+MODEL='/yuchang/lsy_jx/OpenToMe/trainer/flame/exp/gated_deltanet_h_340M-10B/batch1.seqlen32768.grad_acc4.warmup2048.update1.steps20480.4gpus.lr4e-4'
 
 python -m harness --model hf \
     --model_args pretrained=$MODEL,dtype=bfloat16 \

@@ -1,13 +1,13 @@
 #!/bin/bash
 
-DATA_DIR=/yuchang/lsy/data/ImageNet/
+DATA_DIR=/ssdwork/yuchang/ImageNet
 OUTPUT_DIR=./work_dirs/classification
 EXP_NAME=test
 
 export CUDA_LAUNCH_BLOCKING=1
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
-CUDA_VISIBLE_DEVICES=1 torchrun --standalone --nproc_per_node=1 in1k_trainer.py \
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 in1k_trainer.py \
   --data_dir ${DATA_DIR} \
   --dataset ImageFolder \
   --train_split train \
@@ -19,23 +19,19 @@ CUDA_VISIBLE_DEVICES=1 torchrun --standalone --nproc_per_node=1 in1k_trainer.py 
   --dtem_t 2 \
   --total_merge_local 16 \
   --total_merge_latent 8 \
-  --use_softkmax \
-  --use_cross_attention \
   --img_size 224 \
-  --batch_size 8 \
+  --batch_size 16 \
   --epochs 300 \
-  --lr 5e-3 \
-  --warmup_lr 1e-3 \
+  --lr 5e-4 \
   --weight_decay 0.05 \
   --sched cosine \
-  --warmup_epochs 2 \
-  --clip_grad 1.0 \
-  --clip_mode norm \
+  --warmup_epochs 5 \
   --mixup 0.8 \
   --cutmix 1.0 \
   --smoothing 0.1 \
   --aa rand-m9-mstd0.5-inc1 \
   --workers 8 \
+  --amp \
   --output ${OUTPUT_DIR} \
   --experiment ${EXP_NAME} \
   --seed 42

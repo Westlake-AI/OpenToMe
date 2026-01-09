@@ -5,7 +5,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import torchvision
 import torchvision.transforms as transforms
-from opentome.models.transformer_archieve_yukai.model import HybridToMeModel
+from opentome.models.model import HybridToMeModel
 try:
     from torch.amp import autocast, GradScaler
     USE_NEW_AMP = True
@@ -26,7 +26,7 @@ def get_args():
     parser.add_argument('--latent_depth', type=int, default=12)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=1)
-    parser.add_argument('--lr', type=float, default=5e-5)
+    parser.add_argument('--lr', type=float, default=5e-4)
     parser.add_argument('--weight_decay', type=float, default=0.05)
     parser.add_argument('--num_heads', type=int, default=6)
     parser.add_argument('--mlp_ratio', type=float, default=4.0)
@@ -36,10 +36,6 @@ def get_args():
     parser.add_argument('--merge_local', type=int, default=0)
     parser.add_argument('--merge_latent', type=int, default=0)
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument('--use_softkmax', type=bool, default=False)
-    parser.add_argument('--use_cross_attention', type=bool, default=False)
-    parser.add_argument('--num_local_blocks', type=int, default=2)
-    parser.add_argument('--local_block_window', type=int, default=16)
     return parser.parse_args()
 
 def make_dataloaders(img_size, batch_size):
@@ -66,21 +62,21 @@ def main():
     device = args.device
 
     train_loader, test_loader = make_dataloaders(args.img_size, args.batch_size)
-    # import pdb;pdb.set_trace()
+
     model = HybridToMeModel(img_size=args.img_size, patch_size=args.patch_size,
                             embed_dim=args.embed_dim, num_heads=args.num_heads,
                             mlp_ratio=args.mlp_ratio, dtem_feat_dim=64,
                             local_depth=args.local_depth, latent_depth=args.latent_depth,
                             tome_use_naive_local=False, total_merge_local=args.merge_local, total_merge_latent=args.merge_latent,
-                            dtem_window_size=args.dtem_window_size, tome_window_size=args.tome_window_size, use_softkmax=args.use_softkmax, use_cross_attention=args.use_cross_attention,
-                            num_local_blocks=args.num_local_blocks, local_block_window=args.local_block_window)
+                            dtem_window_size=args.dtem_window_size, tome_window_size=args.tome_window_size)
 
     # DTEM 温度与超参
     model.local.vit._tome_info["k2"] = 4
     model.local.vit._tome_info["tau1"] = 1.0
-    model.local.vit._tome_info["tau2"] = 10
+    model.local.vit._tome_info["tau2"] = 0.1
+
     model.to(device)
-  
+
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
@@ -135,4 +131,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-# python /yuchang/yk/opentome_new/trainer/classification/train.py --epochs 50 --batch_size 100 --img_size 224 --local_depth 4 --latent_depth 12 --merge_local 98 --merge_latent 4 --use_softkmax True --use_cross_attention True
+# python /yuchang/yk/OpenToMe_yk_beta/opentome/models/train.py --epochs 20 --batch_size 100 --img_size 224 --local_depth 4 --latent_depth 12 --merge_local 8 --merge_latent 4

@@ -2,6 +2,9 @@
 
 export HF_ENDPOINT=https://hf-mirror.com
 
+export BACKBONE=transformer_340M
+echo $BACKBONE
+
 NNODE=1 NGPU=1 LOG_RANK=0 bash train.sh \
   --job.config_file flame/models/fla.toml \
   --job.dump_folder exp/test \

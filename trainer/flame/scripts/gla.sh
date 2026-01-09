@@ -1,8 +1,10 @@
 #!/usr/bin/bash
 
 export HF_ENDPOINT=https://hf-mirror.com
+export BACKBONE=gla
+echo $BACKBONE
 
-NNODE=1 NGPU=8 LOG_RANK=0 bash train.sh \
+NNODE=1 NGPU=4 LOG_RANK=0 bash train.sh \
   --job.config_file flame/models/fla.toml \
   --job.dump_folder exp/gla-340M-10B/batch1.seqlen32768.grad_acc2.warmup1024.update1.steps20480.lr3e-4 \
   --model.config configs/gla_340M.json \

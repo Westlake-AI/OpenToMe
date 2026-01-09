@@ -185,6 +185,16 @@ class OnlineTokenizedIterableDataset(IterableDataset):
     def tokenize(self, data, buffer_size: int = 64):
         buffer, states = [], []
         for sample in data:
+            # ------ jinxin ------ #
+            # Sample: 
+            #        text: str
+            #        id: <xxx>
+            #        ...
+            #        language: en/cn
+            #        language score: float
+            #        token count: int
+            #        score / int_score : float/int
+            # print(sample)
             if sample.get('text', None) is not None:
                 buffer.append(sample['text'])
             elif sample.get('content', None) is not None:
@@ -192,7 +202,7 @@ class OnlineTokenizedIterableDataset(IterableDataset):
             else:
                 raise ValueError(f"No 'text' or 'content' field found in sample:\n{sample}")
             states.append(self.data.state_dict())
-            if len(buffer) == buffer_size:
+            if len(buffer) == buffer_size:   # 🌟Tips: self.tokenizer() 直接调用的 __call__
                 for s, tokenized in zip(states, self.tokenizer(buffer, return_attention_mask=False)['input_ids']):
                     self.states = s
                     yield tokenized
