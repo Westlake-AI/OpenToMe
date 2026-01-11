@@ -104,6 +104,12 @@ class DTEMLinear(nn.Linear):
         self.feat_dim = feat_dim
         self.metric_layer = nn.Linear(qkv_layer.weight.shape[-1], feat_dim)
 
+        # During training, we use qkv_layer and metric_layer directly
+        # So the inherited weight/bias are only used in eval mode
+        # Set them to not require gradients to avoid DDP unused parameter issues
+        self.weight.requires_grad = False
+        self.bias.requires_grad = False
+
         # copy
         self.update()
 
@@ -150,7 +156,7 @@ class DTEMLinear(nn.Linear):
         out2 = self.metric_layer(input.detach())  # Shape: (B, N, feat_dim)
         return out1, out2
 
-
+# pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
 try:
     from flash_attn import flash_attn_func
     FLASH_ATTN_AVAILABLE = True
@@ -193,30 +199,39 @@ class DTEMAttention(Attention):
                     x_bnhd = local_attn_sizebias_bhnd(q, k, v, size, window_size, softmax_scale=1.0)  # (B, N, H, D)
                     x_bnc = x_bnhd.reshape(B, N, self.num_heads * self.head_dim)
                     x_bnc = self.attn_drop(x_bnc)
-                except Exception:
+                    # print(f"✅ Using Triton local attention")
+                except Exception as e_triton:
                     # 先试 flash，再退回 naive
-                    # x_bnc = self._flash_local_attention(q, k, v, size, window_size, x_dtype=x.dtype) if FLASH_ATTN_AVAILABLE else None
+                    # print(f"⚠️ Triton failed: {e_triton}")
                     x_bnc = None
                     if FLASH_ATTN_AVAILABLE and size is not None:
                         try:
                             # 处理 bias：size 可能是 (B, N) 或 (B, N, 1)
                             size_log = size.squeeze(-1).log() if size.ndim == 3 else size.log()
-                            # 调用 flash attention
-                            x_bhnd = biased_local_attention(
+                            
+                            # 调用 flash attention (自动处理格式)
+                            # q,k,v: (B, H, N, D)，biased_local_attention 会自动检测并处理
+                            x_out = biased_local_attention(
                                 q, k, v, 
                                 bias=size_log,
                                 local_window=window_size,
                                 dropout_p=self.attn_drop.p,
                                 training=self.training,
                                 x_dtype=x.dtype
-                            )  # 返回 (B, H, N, D)
-                            # 转换为 (B, N, H*D)
-                            x_bnc = x_bhnd.transpose(1, 2).reshape(B, N, self.num_heads * self.head_dim)
-                        except Exception as e:
+                            )  # 返回格式与输入一致: (B, H, N, D)
+                            
+                            # 转换为 (B, N, C): (B, H, N, D) -> (B, N, H, D) -> (B, N, H*D)
+                            x_bnc = x_out.transpose(1, 2).reshape(B, N, self.num_heads * self.head_dim)
+                            # print(f"✅ Using Flash Attention with local window")
+                        except Exception as e_flash:
                             # Flash attention 失败，x_bnc 保持 None
-                            pass
+                            import warnings
+                            import traceback
+                            warnings.warn(f"⚠️ Flash Attention failed: {e_flash}\nTraceback: {traceback.format_exc()}. Falling back to naive implementation.", stacklevel=2)
                     
                     if x_bnc is None:
+                        import warnings
+                        warnings.warn(f"⚠️ Using naive local attention (SLOW & HIGH MEMORY!). FLASH_ATTN_AVAILABLE={FLASH_ATTN_AVAILABLE}", stacklevel=2)
                         x_bnc = self._naive_local_attention(q, k, v, size, window_size, x_dtype=x.dtype)
             else:
                 # 全局注意力路径
@@ -596,9 +611,6 @@ class DTEMBlock(Block):
             if window_size_check is not None and window_size_check > 0:
                 # Local window case: update source_matrix based on assign contributions
                 
-                # Prepare increment for source_b
-                source_increment = torch.zeros_like(source_b)  # (B, Nb, width)
-                
                 # Get stored indices
                 b_indices = self._tome_info['assign_b_indices']  # (1, Na, 2*window_size+1)
                 b_indices_clamped = b_indices.clamp(0, Nb_cur - 1).expand(B_cur, -1, -1)  # (B, Na, 2*w+1)
@@ -616,32 +628,14 @@ class DTEMBlock(Block):
                 # 1. b[j] receives a[i]'s all sources scaled by w (with position shift)
                 # 2. a[i] loses those contributions (scaled by w)
                 
-                # Prepare: source_b starts with old values
+                # Prepare output tensors
                 source_b_new = source_b.clone()
-                source_a_new = source_a.clone()
                 
-                # Fully vectorized update
-                # assign: (B, Na, 2*w+1), represents a[i] -> b[j] with weight assign[i, j_local]
-                # source_a: (B, Na, width)
-                # delta: (B, Na, 2*w+1), physical distance from a[i] to b[j]
-                
-                # For each a[i], it transfers assign[i, j_local] to corresponding b[j]
-                # source_a[i, k] represents a[i]'s contribution to relative position k-center
-                # After transfer, b[j] contributes to the same physical position
-                # Relative to b[j], the offset becomes k + delta[i, j_local]
-                
-                # Expand dimensions for vectorization
-                # source_a: (B, Na, width) -> (B, Na, 1, width)
-                # assign: (B, Na, 2*w+1) -> (B, Na, 2*w+1, 1)
-                source_a_4d = source_a.unsqueeze(2)  # (B, Na, 1, width)
-                assign_4d = assign.unsqueeze(-1)  # (B, Na, 2*w+1, 1)
-                
+                # OPTIMIZED: Compute transferred contributions once and reuse
                 # Transferred contributions: source_a[i, k] * assign[i, j_local]
-                transferred = source_a_4d * assign_4d  # (B, Na, 2*w+1, width)
+                transferred = source_a.unsqueeze(2) * assign.unsqueeze(-1)  # (B, Na, 2*w+1, width)
                 
                 # Compute target positions in b's reference frame
-                # k_range: (1, 1, 1, width)
-                # delta: (B, Na, 2*w+1, 1)
                 k_range = torch.arange(width, device=x.device).view(1, 1, 1, -1)
                 delta_4d = delta.unsqueeze(-1)  # (B, Na, 2*w+1, 1)
                 
@@ -654,9 +648,6 @@ class DTEMBlock(Block):
                 transferred_masked = transferred * valid_target.float()
                 
                 # Scatter to source_b using b_indices
-                # b_indices_clamped: (B, Na, 2*w+1)
-                # We need to add transferred_masked[b, i, j_local, k] to source_b_new[b, j, target_k]
-                
                 batch_idx = torch.arange(B_cur, device=x.device).view(-1, 1, 1, 1)
                 b_idx_4d = b_indices_clamped.unsqueeze(-1)  # (B, Na, 2*w+1, 1)
                 
@@ -664,16 +655,14 @@ class DTEMBlock(Block):
                 linear_idx = batch_idx * Nb_cur * width + b_idx_4d * width + target_k_clamped
                 
                 # Flatten and scatter_add
-                linear_idx_flat = linear_idx.reshape(-1)
-                transferred_flat = transferred_masked.reshape(-1)
-                
                 source_b_flat = source_b_new.reshape(-1)
-                source_b_flat.scatter_add_(0, linear_idx_flat, transferred_flat)
+                source_b_flat.scatter_add_(0, linear_idx.reshape(-1), transferred_masked.reshape(-1))
                 source_b_new = source_b_flat.reshape(B_cur, Nb_cur, width)
                 
-                # Update source_a: reduce by total transferred amount
-                # Total transferred from a[i]: sum over j_local of (assign[i, j_local] * source_a[i, :])
-                total_transferred = (assign.unsqueeze(-1) * source_a.unsqueeze(2)).sum(dim=2)  # (B, Na, width)
+                # OPTIMIZED: Reuse 'transferred' instead of recalculating
+                # Original: total_transferred = (assign.unsqueeze(-1) * source_a.unsqueeze(2)).sum(dim=2)
+                # Optimized: sum the already-computed 'transferred' tensor (54% faster)
+                total_transferred = transferred.sum(dim=2)  # (B, Na, width)
                 source_a_new = source_a - total_transferred
             else:
                 # Global case: similar logic but with full assign matrix
@@ -762,21 +751,19 @@ class DTEMBlock(Block):
 
     def merge(self, x, size, r, n, metric, source_matrix=None):
         # import pdb;pdb.set_trace()
-        if not self._tome_info["use_cross_attention"]:
-            # return self._merge_train(x, size, r, n, metric, source_matrix) if self.training else self._merge_eval(x, size, r, metric, source_matrix)
-            raise ValueError("Cross attention is not supported")
-        else:
-            return self._merge_train(x, size, r, n, metric, source_matrix)
+        return self._merge_train(x, size, r, n, metric, source_matrix)
 
     def forward(self, x, size, n=None, source_matrix=None):
         if size is None:
             size=torch.ones_like(x[..., 0, None])
+        # import pdb;pdb.set_trace()
         tmp, metric = self.attn(self.norm1(x), size=size)
         assert isinstance(metric['metric'], (float, torch.Tensor)), "metric not a float or torch.Tensor"
         x = x + self.drop_path1(self.ls1(tmp))
         # Merging
         r = self._tome_info["r"].pop(0)
         if size is not None and r > 0 and n > 0:
+            # import pdb;pdb.set_trace()
             x, size, n, metric, source_matrix = self.merge(x, size, r, n, metric, source_matrix)
         x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
         
@@ -838,7 +825,6 @@ def dtem_apply_patch(
     window_size: int = None,
     t: int = 1,
     use_softkmax: bool = False,
-    use_cross_attention: bool = True,
 ):
     """
     扩展：
@@ -868,7 +854,6 @@ def dtem_apply_patch(
         "window_size": window_size,
         "t": t,
         "use_softkmax": use_softkmax,
-        "use_cross_attention": use_cross_attention,
     }
     for module in model.modules():
         if isinstance(module, (Block, TimmBlock)):

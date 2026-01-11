@@ -111,6 +111,8 @@ parser.add_argument('--gp', default=None, type=str, metavar='POOL',
                     help='Global pool type, one of (fast, avg, max, avgmax, avgmaxc). Model default if None.')
 parser.add_argument('--img_size', type=int, default=None, metavar='N',
                     help='Image patch size (default: None => model default)')
+parser.add_argument('--patch_size', type=int, default=16, metavar='N',
+                    help='Patch size for ViT (default: 16)')
 parser.add_argument('--input_size', default=None, nargs=3, type=int,
                     metavar='N N N', help='Input all image dimensions (d h w, e.g. --input-size 3 224 224), uses model default if empty')
 parser.add_argument('--crop_pct', default=0.90, type=float,
@@ -133,10 +135,24 @@ parser.add_argument("--dtem_r", type=int, default=2,
                     help="Reduction ratio r in DETM.")
 parser.add_argument("--dtem_t", type=int, default=1,
                     help="Temporal parameter t in DETM.")
-parser.add_argument("--total_merge_local", type=int, default=8,
-                    help="Total number of local tokens to merge.")
+parser.add_argument("--dtem_feat_dim", type=int, default=None,
+                    help="Feature dimension for DTEM (None means use default).")
+parser.add_argument("--lambda_local", type=float, default=2.0,
+                    help="Lambda for calculating total_merge_local automatically: total_merge_local = N * (lambda - 1) / lambda.")
 parser.add_argument("--total_merge_latent", type=int, default=4,
                     help="Total number of latent tokens to merge.")
+parser.add_argument("--use_softkmax", action='store_true', default=False,
+                    help="Use softkmax variant in DTEM.")
+parser.add_argument("--num_local_blocks", type=int, default=0,
+                    help="Number of additional local blocks before DTEM blocks.")
+parser.add_argument("--local_block_window", type=int, default=16,
+                    help="Window size for additional local blocks.")
+
+# ToMe parameters
+parser.add_argument("--tome_window_size", type=int, default=None,
+                    help="Window size for ToMe (None means global).")
+parser.add_argument("--tome_use_naive_local", action='store_true', default=False,
+                    help="Use naive local windowing for ToMe.")
 
 # Optimizer parameters
 parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
@@ -377,16 +393,31 @@ def main():
 
     random_seed(args.seed, args.rank)
 
-    model = create_model(
-        args.model,
-        pretrained=args.pretrained,
-        num_classes=args.num_classes,
-        dtem_window_size=args.dtem_window_size, 
-        dtem_r=args.dtem_r, 
-        dtem_t=args.dtem_t,
-        total_merge_local=args.total_merge_local, 
-        total_merge_latent=args.total_merge_latent,
-        )
+    # Prepare model kwargs - only include custom parameters for specific models
+    model_kwargs = {
+        'pretrained': args.pretrained,
+        'num_classes': args.num_classes,
+    }
+    
+    # Add custom parameters only for models that support them (e.g., hybridtomevit)
+    if 'hybridtome' in args.model.lower() or 'tome' in args.model.lower():
+        model_kwargs.update({
+            'img_size': args.img_size,
+            'patch_size': args.patch_size,
+            'dtem_window_size': args.dtem_window_size,
+            'dtem_r': args.dtem_r,
+            'dtem_t': args.dtem_t,
+            'dtem_feat_dim': args.dtem_feat_dim,
+            'lambda_local': args.lambda_local,
+            'total_merge_latent': args.total_merge_latent,
+            'use_softkmax': args.use_softkmax,
+            'num_local_blocks': args.num_local_blocks,
+            'local_block_window': args.local_block_window,
+            'tome_window_size': args.tome_window_size,
+            'tome_use_naive_local': args.tome_use_naive_local,
+        })
+    
+    model = create_model(args.model, **model_kwargs)
     if args.num_classes is None:
         assert hasattr(model, 'num_classes'), 'Model must have `num_classes` attr if not set on cmd line/config.'
         args.num_classes = model.num_classes  # FIXME handle model default vs config num_classes more elegantly
@@ -720,7 +751,12 @@ def train_one_epoch(epoch: int,
             input = input.contiguous(memory_format=torch.channels_last)
 
         with amp_autocast():
-            output, _ = model(input)
+            output = model(input)
+            
+            # Handle models that return tuple (custom models) vs single output (standard models)
+            if isinstance(output, (tuple, list)):
+                output = output[0]
+            
             loss = loss_fn(output, target)
             if torch.any(torch.isnan(loss)) or torch.any(torch.isinf(loss)):
                 raise ValueError("Inf or nan loss value: use fp32 training instead!")
