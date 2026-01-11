@@ -327,7 +327,10 @@ def biased_local_attention(
         input_format = "BNHD"
     else:
         # (B, H, N, D) 格式
-        B, H, N, D = q.shape
+        # 🔧 FIX: 变量名应该反映语义含义，不是 tensor 的维度顺序
+        # B=batch, N=seq_len, H=heads, D=head_dim
+        temp_B, temp_H, temp_N, temp_D = q.shape
+        B, N, H, D = temp_B, temp_N, temp_H, temp_D  # 重新排列以匹配语义
         input_format = "BHND"
     
     # 验证形状一致性
@@ -370,8 +373,10 @@ def biased_local_attention(
         v = v.clone() if not v.is_contiguous() else v
         
         # 在第 D_logic 列写入 bias
+        # 此时 q,k 形状: (B, H, N, D)
         q[..., D_logic] = math.sqrt(D_logic)
-        k[..., D_logic] = bias.view(B, N, 1).to(k.dtype)
+        # 🔧 FIX: bias (B, N) → (B, 1, N) 才能 broadcast 到 (B, H, N)
+        k[..., D_logic] = bias.unsqueeze(1).to(k.dtype)
         
         # 其余列置零
         if D > D_logic + 1:
@@ -399,35 +404,49 @@ def biased_local_attention(
             out = out.transpose(1, 2).contiguous()
         
         return out.to(output_dtype)
-    
+    # import pdb;pdb.set_trace()
     # ========================================================================
     # 通用路径：构造对齐到 8 的倍数的物理张量
     # ========================================================================
     D_ext = D_logic + 1  # 逻辑上需要扩展一列
     D_phys = ((D_ext + 7) // 8) * 8  # 向上对齐到 8 的倍数
     
-    # 从缓存获取或创建 buffer
-    key = (q.device, q.dtype, B, N, H, D_phys)
-    q_phys = _get_cached_buffer(
-        _flash_pad_cache, ('q',) + key, (B, N, H, D_phys),
-        q.device, q.dtype, q.requires_grad
-    )
-    k_phys = _get_cached_buffer(
-        _flash_pad_cache, ('k',) + key, (B, N, H, D_phys),
-        k.device, k.dtype, k.requires_grad
-    )
-    v_phys = _get_cached_buffer(
-        _flash_pad_cache, ('v',) + key, (B, N, H, D_phys),
-        v.device, v.dtype, v.requires_grad
-    )
+    # 🔧 FIX: 此时 q,k,v 已经统一为 (B, H, N, D) 格式（经过 line 357-361 处理）
+    # 创建对齐后的 buffer，使用 (B, H, N, D_phys) 顺序
+    # 
+    # 注意：训练时不使用缓存，因为 Flash Attention 会保存输入用于 backward，
+    # 缓存会导致多个 iteration 共享同一块内存，产生 "modified by inplace" 错误。
+    # 推理时可以使用缓存，因为不需要梯度。
+    if training:
+        # 训练模式：每次创建新 tensor
+        q_phys = torch.zeros((B, H, N, D_phys), device=q.device, dtype=q.dtype)
+        k_phys = torch.zeros((B, H, N, D_phys), device=k.device, dtype=k.dtype)
+        v_phys = torch.zeros((B, H, N, D_phys), device=v.device, dtype=v.dtype)
+    else:
+        # 推理模式：使用缓存优化
+        key = (q.device, q.dtype, B, H, N, D_phys)
+        q_phys = _get_cached_buffer(
+                _flash_pad_cache, ('q',) + key, (B, H, N, D_phys),
+                q.device, q.dtype, requires_grad=False
+        )
+        k_phys = _get_cached_buffer(
+                _flash_pad_cache, ('k',) + key, (B, H, N, D_phys),
+                k.device, k.dtype, requires_grad=False
+        )
+        v_phys = _get_cached_buffer(
+                _flash_pad_cache, ('v',) + key, (B, H, N, D_phys),
+                v.device, v.dtype, requires_grad=False
+        )
     
     # 拷贝原始数据
     q_phys[..., :D] = q
     k_phys[..., :D] = k
     
     # 在第 D_logic 列填充 bias（这是关键！）
+    # q_phys, k_phys 形状: (B, H, N, D_phys)
     q_phys[..., D_logic] = math.sqrt(D_logic)
-    k_phys[..., D_logic] = bias.view(B, N, 1).to(k.dtype)
+    # 🔧 FIX: bias (B, N) → (B, 1, N) 才能 broadcast 到 (B, H, N)
+    k_phys[..., D_logic] = bias.unsqueeze(1).to(k.dtype)
     
     # 其余 padding 列置零（欺骗 flash-attn，让它走快速路径）
     if D_phys > D_ext:
@@ -550,19 +569,30 @@ def unbiased_local_attention(
     
     # 非对齐场景：物理对齐到 8 的倍数
     D_phys = ((D + 7) // 8) * 8
-    key = (q.device, q.dtype, B, N, H, D_phys)
-    q_phys = _get_cached_buffer(
-        _flash_pad_cache, ('q_ub',) + key, (B, N, H, D_phys),
-        q.device, q.dtype, q.requires_grad
-    )
-    k_phys = _get_cached_buffer(
-        _flash_pad_cache, ('k_ub',) + key, (B, N, H, D_phys),
-        k.device, k.dtype, k.requires_grad
-    )
-    v_phys = _get_cached_buffer(
-        _flash_pad_cache, ('v_ub',) + key, (B, N, H, D_phys),
-        v.device, v.dtype, v.requires_grad
-    )
+    
+    # 🔧 FIX: 此时 q,k,v 已经是 (B, H, N, D) 格式（经过 line 548-551 处理）
+    # 注意：训练时不使用缓存，因为 Flash Attention 会保存输入用于 backward，
+    # 缓存会导致多个 iteration 共享同一块内存，产生 "modified by inplace" 错误。
+    if training:
+        # 训练模式：每次创建新 tensor
+        q_phys = torch.zeros((B, H, N, D_phys), device=q.device, dtype=q.dtype)
+        k_phys = torch.zeros((B, H, N, D_phys), device=k.device, dtype=k.dtype)
+        v_phys = torch.zeros((B, H, N, D_phys), device=v.device, dtype=v.dtype)
+    else:
+        # 推理模式：使用缓存优化
+        key = (q.device, q.dtype, B, H, N, D_phys)
+        q_phys = _get_cached_buffer(
+            _flash_pad_cache, ('q_ub',) + key, (B, H, N, D_phys),
+            q.device, q.dtype, requires_grad=False
+        )
+        k_phys = _get_cached_buffer(
+            _flash_pad_cache, ('k_ub',) + key, (B, H, N, D_phys),
+            k.device, k.dtype, requires_grad=False
+        )
+        v_phys = _get_cached_buffer(
+            _flash_pad_cache, ('v_ub',) + key, (B, H, N, D_phys),
+            v.device, v.dtype, requires_grad=False
+        )
     
     q_phys[..., :D] = q
     k_phys[..., :D] = k
