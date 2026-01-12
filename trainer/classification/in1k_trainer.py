@@ -351,6 +351,10 @@ def _parse_args():
 
 def main():
     setup_default_logging()
+    if hasattr(torch.serialization, 'add_safe_globals'):
+        import argparse
+        torch.serialization.add_safe_globals([argparse.Namespace])
+
     args, args_text = _parse_args()
 
     if args.log_wandb:
@@ -660,6 +664,7 @@ def main():
 
     try:
         entropy_thr = 0
+        print(model)
         for epoch in range(start_epoch, num_epochs):
             if args.distributed and hasattr(loader_train.sampler, 'set_epoch'):
                 loader_train.sampler.set_epoch(epoch)
@@ -734,7 +739,6 @@ def train_one_epoch(epoch: int,
     losses_m = AverageMeter()
 
     model.train()
-    print(model)
     all_entropy = []
 
     end = time.time()

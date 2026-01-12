@@ -4,11 +4,12 @@
 DATA_DIR=/ssdwork/yuchang/ImageNet
 OUTPUT_DIR=./work_dirs/classification
 EXP_NAME=test_260111
+RESUME_PATH="/yuchang/yk/OpenToMe/trainer/classification/work_dirs/classification/test_260111/last.pth.tar"
 
 export CUDA_LAUNCH_BLOCKING=1
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
-CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node=1 in1k_trainer.py \
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 in1k_trainer.py \
   --data_dir ${DATA_DIR} \
   --dataset ImageFolder \
   --train_split train \
@@ -27,7 +28,7 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node=1 in1k_trainer.py 
   --local_block_window 32 \
   --batch_size 512 \
   --epochs 300 \
-  --lr 5e-5 \
+  --lr 5e-4 \
   --weight_decay 0.05 \
   --sched cosine \
   --warmup_epochs 5 \
@@ -40,4 +41,5 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node=1 in1k_trainer.py 
   --output ${OUTPUT_DIR} \
   --experiment ${EXP_NAME} \
   --seed 42 \
-  --use_softkmax
+  --use_softkmax \
+  --resume ${RESUME_PATH}
