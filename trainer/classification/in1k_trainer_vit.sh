@@ -16,7 +16,7 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node=1 in1k_trainer.py 
   --val_split val \
   --model vit_base_patch16_224 \
   --num_classes 1000 \
-  --batch_size 1024 \
+  --batch_size 512 \
   --epochs 300 \
   --lr 5e-4 \
   --weight_decay 0.05 \

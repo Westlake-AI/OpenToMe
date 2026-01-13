@@ -105,6 +105,7 @@ class MyCrossAttention(nn.Module):
                     dropout_p=self.attn_drop if self.training else 0.0,
                     softmax_scale=1.0 / (self.head_dim ** 0.5),
                     causal=False,
+                    deterministic=not self.training,  # Ensure deterministic behavior during eval
                 )  # (B, Nq, num_heads, head_dim)
                 
                 # Note: If your flash_attn version supports attn_bias, add it as a parameter above

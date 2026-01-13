@@ -651,7 +651,6 @@ def main():
 
 
 def build_dataset(args, data_config, collate_fn, num_aug_splits):
-
     if args.dataset.lower() in ['cifar100', 'cifar10']:
         if args.dataset.lower() == 'cifar100':
             DatasetClass = CIFAR100
@@ -668,7 +667,7 @@ def build_dataset(args, data_config, collate_fn, num_aug_splits):
         dataset_train = DatasetClass(root=args.data_dir, train=True, download=args.dataset_download)
         dataset_eval  = DatasetClass(root=args.data_dir, train=False, download=args.dataset_download)
 
-    elif args.dataset.lower() in ['imagenet']:
+    elif args.dataset.lower() in ['imagenet', 'imagefolder', '']:
         dataset_train = create_dataset(
             args.dataset, root=args.data_dir, split=args.train_split, is_training=True,
             class_map=args.class_map,
@@ -764,6 +763,8 @@ def train_one_epoch(epoch: int,
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     losses_m = AverageMeter()
+    top1_m = AverageMeter()
+    top5_m = AverageMeter()
 
     model.train()
     all_entropy = []
@@ -776,8 +777,14 @@ def train_one_epoch(epoch: int,
         data_time_m.update(time.time() - end)
         if not args.prefetcher:
             input, target = input.cuda(), target.cuda()
+            # Save original target for accuracy calculation (before mixup)
+            target_for_acc = target.clone() if mixup_fn is not None else target
             if mixup_fn is not None:
                 input, target = mixup_fn(input, target)
+        else:
+            # When using prefetcher, target is already on GPU
+            # Note: prefetcher may apply mixup, in which case accuracy won't be calculated
+            target_for_acc = target
         if args.channels_last:
             input = input.contiguous(memory_format=torch.channels_last)
 
@@ -791,6 +798,15 @@ def train_one_epoch(epoch: int,
             loss = loss_fn(output, target)
             if torch.any(torch.isnan(loss)) or torch.any(torch.isinf(loss)):
                 raise ValueError("Inf or nan loss value: use fp32 training instead!")
+
+        # Calculate accuracy with original hard labels (not soft labels from mixup)
+        if mixup_fn is None or not mixup_fn.mixup_enabled:
+            acc1, acc5 = accuracy(output, target_for_acc, topk=(1, 5))
+            if args.distributed:
+                acc1 = reduce_tensor(acc1, args.world_size)
+                acc5 = reduce_tensor(acc5, args.world_size)
+            top1_m.update(acc1.item(), output.size(0))
+            top5_m.update(acc5.item(), output.size(0))
 
         if not args.distributed:
             losses_m.update(loss.item(), input.size(0))
@@ -824,23 +840,62 @@ def train_one_epoch(epoch: int,
                 reduced_loss = reduce_tensor(loss.data, args.world_size)
                 losses_m.update(reduced_loss.item(), input.size(0))
 
+            # 🔍 DEBUG: Run the same batch in eval mode for comparison
+            eval_acc1, eval_acc5 = 0.0, 0.0
+            if (mixup_fn is None or not mixup_fn.mixup_enabled) and args.local_rank == 0:
+                model.eval()
+                with torch.no_grad():
+                    with amp_autocast():
+                        eval_output = model(input)
+                        if isinstance(eval_output, (tuple, list)):
+                            eval_output = eval_output[0]
+                    eval_acc1, eval_acc5 = accuracy(eval_output, target_for_acc, topk=(1, 5))
+                model.train()
+
             if args.local_rank == 0:
-                _logger.info(
-                    'Train: {} [{:>4d}/{} ({:>3.0f}%)]  '
-                    'Loss: {loss.val:#.4g} ({loss.avg:#.3g})  '
-                    'Time: {batch_time.val:.3f}s, {rate:>7.2f}/s  '
-                    '({batch_time.avg:.3f}s, {rate_avg:>7.2f}/s)  '
-                    'LR: {lr:.3e}  '
-                    'Data: {data_time.val:.3f} ({data_time.avg:.3f})'.format(
-                        epoch,
-                        batch_idx, len(loader),
-                        100. * batch_idx / last_idx,
-                        loss=losses_m,
-                        batch_time=batch_time_m,
-                        rate=input.size(0) * args.world_size / batch_time_m.val,
-                        rate_avg=input.size(0) * args.world_size / batch_time_m.avg,
-                        lr=lr,
-                        data_time=data_time_m))
+                # Build log message based on whether accuracy is available
+                if mixup_fn is None or not mixup_fn.mixup_enabled:
+                    log_msg = (
+                        'Train: {} [{:>4d}/{} ({:>3.0f}%)]  '
+                        'Loss: {loss.val:#.4g} ({loss.avg:#.3g})  '
+                        'Acc@1: {top1.val:>7.3f} ({top1.avg:>7.3f})  '
+                        'Acc@5: {top5.val:>7.3f} ({top5.avg:>7.3f})  '
+                        '🔍 EVAL Acc@1: {eval_acc1:>7.3f}  Acc@5: {eval_acc5:>7.3f}  '
+                        'Time: {batch_time.val:.3f}s, {rate:>7.2f}/s  '
+                        '({batch_time.avg:.3f}s, {rate_avg:>7.2f}/s)  '
+                        'LR: {lr:.3e}  '
+                        'Data: {data_time.val:.3f} ({data_time.avg:.3f})'.format(
+                            epoch,
+                            batch_idx, len(loader),
+                            100. * batch_idx / last_idx,
+                            loss=losses_m,
+                            top1=top1_m,
+                            top5=top5_m,
+                            eval_acc1=eval_acc1.item() if isinstance(eval_acc1, torch.Tensor) else eval_acc1,
+                            eval_acc5=eval_acc5.item() if isinstance(eval_acc5, torch.Tensor) else eval_acc5,
+                            batch_time=batch_time_m,
+                            rate=input.size(0) * args.world_size / batch_time_m.val,
+                            rate_avg=input.size(0) * args.world_size / batch_time_m.avg,
+                            lr=lr,
+                            data_time=data_time_m))
+                else:
+                    log_msg = (
+                        'Train: {} [{:>4d}/{} ({:>3.0f}%)]  '
+                        'Loss: {loss.val:#.4g} ({loss.avg:#.3g})  '
+                        'Time: {batch_time.val:.3f}s, {rate:>7.2f}/s  '
+                        '({batch_time.avg:.3f}s, {rate_avg:>7.2f}/s)  '
+                        'LR: {lr:.3e}  '
+                        'Data: {data_time.val:.3f} ({data_time.avg:.3f})'.format(
+                            epoch,
+                            batch_idx, len(loader),
+                            100. * batch_idx / last_idx,
+                            loss=losses_m,
+                            batch_time=batch_time_m,
+                            rate=input.size(0) * args.world_size / batch_time_m.val,
+                            rate_avg=input.size(0) * args.world_size / batch_time_m.avg,
+                            lr=lr,
+                            data_time=data_time_m))
+                _logger.info(log_msg)
 
                 if args.save_images and output_dir:
                     torchvision.utils.save_image(
@@ -862,7 +917,11 @@ def train_one_epoch(epoch: int,
     if hasattr(optimizer, 'sync_lookahead'):
         optimizer.sync_lookahead()
 
-    return OrderedDict([('loss', losses_m.avg)]), all_entropy
+    # Return metrics (only include accuracy if not using mixup)
+    if mixup_fn is None or not mixup_fn.mixup_enabled:
+        return OrderedDict([('loss', losses_m.avg), ('top1', top1_m.avg), ('top5', top5_m.avg)]), all_entropy
+    else:
+        return OrderedDict([('loss', losses_m.avg)]), all_entropy
 
 
 # utils

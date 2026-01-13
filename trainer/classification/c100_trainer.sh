@@ -1,14 +1,14 @@
 #!/bin/bash
-# bash in1k_trainer.sh 2>&1 | tee train_log_$(date +%Y%m%d_%H%M%S).txt
+# bash c100_trainer.sh 2>&1 | tee train_log_$(date +%Y%m%d_%H%M%S).txt
 
-DATA_DIR=/lisiyuan/data/cifar100/
+DATA_DIR=/yuchang/lsy/data/cifar100/
 OUTPUT_DIR=./work_dirs/classification
-EXP_NAME=cifar100_mergenet_small
+EXP_NAME=cifar100_mergenet_small_260113
 
 export CUDA_LAUNCH_BLOCKING=1
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
-CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node=1 in1k_trainer.py \
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 in1k_trainer.py \
   --data_dir ${DATA_DIR} \
   --dataset CIFAR100 \
   --train_split train \
@@ -25,9 +25,9 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node=1 in1k_trainer.py 
   --total_merge_latent 0 \
   --num_local_blocks 1 \
   --local_block_window 32 \
-  --batch_size 100 \
+  --batch_size 128 \
   --epochs 200 \
-  --lr 1e-3 \
+  --lr 3e-4 \
   --weight_decay 0.05 \
   --sched cosine \
   --warmup_epochs 20 \

@@ -3,7 +3,7 @@
 
 DATA_DIR=/ssdwork/yuchang/ImageNet
 OUTPUT_DIR=./work_dirs/classification
-EXP_NAME=test_260111
+EXP_NAME=test_260113
 RESUME_PATH="/yuchang/yk/OpenToMe/trainer/classification/work_dirs/classification/test_260111/last.pth.tar"
 
 export CUDA_LAUNCH_BLOCKING=1
@@ -42,4 +42,4 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 in1k_trainer.p
   --experiment ${EXP_NAME} \
   --seed 42 \
   --use_softkmax \
-  --resume ${RESUME_PATH}
+  # --resume ${RESUME_PATH}

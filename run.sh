@@ -1,0 +1,1 @@
+python /yuchang/yk/OpenToMe/trainer/classification/train.py --epochs 20 --batch_size 768 --img_size 224 --local_depth 4 --latent_depth 12 --lambda_local 4 --merge_latent 4 --use_softkmax 
