@@ -409,7 +409,6 @@ class DTEMBlock(Block):
         metric = metric['metric']
         metric = metric / metric.norm(dim=-1, keepdim=True)
 
-        n = n if self.training else x.size()[1]
         r = min(r, (n - 1) // 2)
         if r <= 0:
             return x, size, n, metric, source_matrix
@@ -719,11 +718,10 @@ class DTEMBlock(Block):
 
         # =================================================================================== #
         
-        # import pdb;pdb.set_trace()
 
         x_output = torch.cat([x[:, :1], nx, x[:, n:]], dim=1)
         size_output = torch.cat([size[:, :1, 0], w, size[:, n:, 0]], dim=-1).unsqueeze(-1)
-        return x_output, size_output, n - r, _out, source_matrix
+        return x_output, size_output, n , _out, source_matrix
 
     def _merge_eval(self, x, size, r, metric, source_matrix=None):    # eval：保留 ToMe 行为。弃用。
         metric = metric['metric']
