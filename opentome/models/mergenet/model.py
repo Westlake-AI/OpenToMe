@@ -162,7 +162,8 @@ class MyCrossAttention(nn.Module):
 
 class LocalEncoder(nn.Module):
     def __init__(self, img_size=224, patch_size=16, embed_dim=768, num_heads=12, mlp_ratio=4.0,
-                 depth=4, feat_dim=None, window_size: int = None, r: int = 2, t: int = 1, num_classes=10,
+                 depth=4, drop_rate=0.0, attn_drop_rate=0.0, drop_path_rate=0.0,
+                 feat_dim=None, window_size: int = None, r: int = 2, t: int = 1, num_classes=10,
                  num_local_blocks: int = 0, local_block_window: int = 16):
         super().__init__()
         
@@ -185,10 +186,10 @@ class LocalEncoder(nn.Module):
         self.vit = VisionTransformer(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim,
                                      depth=depth, num_heads=num_heads, mlp_ratio=mlp_ratio,
                                      qkv_bias=True, num_classes=0,
-                                     drop_rate=0.0,attn_drop_rate=0.0,drop_path_rate=0.0,)
+                                     drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate)
 
     def forward(self, x):
-        x = self.vit.patch_embed(x)
+        x = self.vit.patch_embed(x)  # automatically inserted cls_token after patch_embed
         x = self.vit._pos_embed(x)
         x = self.vit.patch_drop(x)
         
@@ -224,21 +225,21 @@ class LocalEncoder(nn.Module):
 
 class LatentEncoder(nn.Module):
     def __init__(self, img_size=224, patch_size=16, embed_dim=768, num_heads=12, mlp_ratio=4.0,
-                 depth=12, source_tracking_mode='map', prop_attn=True, window_size=None, use_naive_local=False, r: int = 2):
+                 depth=12, drop_rate=0.0, attn_drop_rate=0.0, drop_path_rate=0.0,
+                 source_tracking_mode='map', prop_attn=True, window_size=None, use_naive_local=False, r: int = 2):
         super().__init__()
         self.vit = VisionTransformer(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim,
                                      depth=depth, num_heads=num_heads, mlp_ratio=mlp_ratio,
-                                     qkv_bias=True, num_classes=0,
-                                     drop_rate=0.0,attn_drop_rate=0.0,drop_path_rate=0.0,)
+                                     qkv_bias=True, num_classes=0, class_token=False, global_pool='',
+                                     drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate)
         # 统一在 HybridToMeModel 中进行 apply_patch（去除未使用占位字段）
-        
-        # LatentEncoder receives pre-embedded tokens, so these parameters are not used in forward
-        # Disable gradients to avoid DDP unused parameter issues
-        self.vit.patch_embed.proj.weight.requires_grad = False
-        self.vit.patch_embed.proj.bias.requires_grad = False
-        self.vit.pos_embed.requires_grad = False
+
+        # LatentEncoder receives pre-embedded tokens, so these parameters are removed
+        self.vit.patch_embed = nn.Identity()
+        # LatentEncoder should not use cls_token
         if hasattr(self.vit, 'cls_token') and self.vit.cls_token is not None:
-            self.vit.cls_token.requires_grad = False
+            del self.vit.cls_token
+        self.vit.num_prefix_tokens = 0
 
     def forward(self, x, size):
         # 重置跨 batch 的踪迹与屏蔽，避免状态泄漏
@@ -254,7 +255,7 @@ class LatentEncoder(nn.Module):
         # has_cls_token = hasattr(self.vit, 'cls_token') and self.vit.cls_token is not None
         # num_prefix_tokens = getattr(self.vit, 'num_prefix_tokens', 0)
         # print(f"[LatentEncoder] has_cls_token: {has_cls_token}, num_prefix_tokens: {num_prefix_tokens}")
-        
+
         for i, blk in enumerate(self.vit.blocks):
             x = blk(x)
             self.vit._tome_info["token_counts_latent"].append(x.shape[1])
@@ -269,14 +270,14 @@ class HybridToMeModel(nn.Module):
         **dict.fromkeys(['b', 'base'],
                         {'embed_dims': 768,
                          'local_depth': 4,
-                         'latent_depth': 12,
+                         'latent_depth': 8,
                          'num_heads': 12,
                          'mlp_ratio': 4.0
                         }),
         **dict.fromkeys(['s', 'small'],
                         {'embed_dims': 384,
                          'local_depth': 4,
-                         'latent_depth': 12,
+                         'latent_depth': 8,
                          'num_heads': 6,
                          'mlp_ratio': 4.0
                         }),
@@ -288,7 +289,10 @@ class HybridToMeModel(nn.Module):
                  patch_size=16, 
                  dtem_feat_dim=None, 
                  tome_window_size=None, 
-                 tome_use_naive_local=False, 
+                 tome_use_naive_local=False,
+                 drop_rate=0.0,
+                 attn_drop_rate=0.0,
+                 drop_path_rate=0.1,
                  num_classes=1000, 
                  dtem_window_size: int = None, 
                  dtem_r: int = 2, 
@@ -342,7 +346,7 @@ class HybridToMeModel(nn.Module):
         self.num_classes = num_classes
 
         self.local = LocalEncoder(self.img_size, self.patch_size, self.embed_dim, self.num_heads, self.mlp_ratio, 
-                                  num_classes = self.num_classes, 
+                                  num_classes = self.num_classes, drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate,
                                   depth = self.local_depth, 
                                   feat_dim = self.dtem_feat_dim, 
                                   window_size = self.dtem_window_size,
@@ -352,7 +356,7 @@ class HybridToMeModel(nn.Module):
                                   local_block_window = self.local_block_window
                                 )
         self.latent = LatentEncoder(self.img_size, self.patch_size, self.embed_dim, self.num_heads, self.mlp_ratio,
-                                    depth = self.latent_depth, 
+                                    depth = self.latent_depth, drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate,
                                     source_tracking_mode = 'map',
                                     prop_attn = True, 
                                     window_size = self.tome_window_size, 
@@ -603,7 +607,9 @@ class CLSHybridToMeModel(HybridToMeModel):
         # Down Sample
         x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias)
         x_latent, size_latent, info_latent = self.latent(x_trace, size_trace)
-        cls_token_repr = x_latent[:, 0]
+
+        # cls_token_repr = x_latent[:, 0]
+        cls_token_repr = x_latent.mean(dim=1)
         logits = self.head(cls_token_repr)
 
         aux = {"token_counts_local": info_local.get("token_counts_local", None)}
@@ -638,3 +644,60 @@ def hybridtomevit_small_cls(pretrained=False, **kwargs):
     return model
 
 # python /yuchang/yk/benchmark_scaleup.py --devices cuda:0 --lengths 64000,128000,256000,512000,1024000,2048000,4096000 --num_workers 8 --model_name resnet50 --model_path /yuchang/yk/resnet50_mixup.pth
+
+
+if __name__ == '__main__':
+    """ Debug script for hybridtomevit_small_cls model during development """
+    from timm.models import create_model
+    # Create model instance (using default parameters similar to trainer)
+    print("=" * 60)
+    print("Creating hybridtomevit_small_cls model...")
+    
+    model = create_model(
+        'hybridtomevit_small_cls',  # model_name must be the first positional argument
+        pretrained=False,
+        num_classes=1000,
+        img_size=224,
+        patch_size=8,
+        dtem_window_size=7,
+        dtem_r=2,
+        dtem_t=1,
+        lambda_local=4.0,
+        total_merge_latent=4,
+        use_softkmax=False,
+        num_local_blocks=0,
+        local_block_window=32,
+        tome_window_size=32,
+        tome_use_naive_local=False,
+    )
+    # Set model to eval mode for inference
+    model.eval()
+    print(model)
+    
+    # Create dummy input: 224x224x3 image -> BxCxHxW format
+    dummy_input = torch.randn(1, 3, 224, 224)
+    
+    print(f"\nInput shape: {dummy_input.shape}")
+    print(f"Model device: {next(model.parameters()).device}")
+    
+    # Move model and input to GPU if available, otherwise CPU
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+    dummy_input = dummy_input.to(device)
+    
+    # Forward pass
+    print("\n" + "=" * 60)
+    print("Running forward pass...")
+    
+    with torch.no_grad():
+        output = model(dummy_input)
+    
+    # Handle output (model returns (logits, aux) tuple)
+    if isinstance(output, tuple):
+        logits, aux = output
+        print(f"\nOutput logits shape: {logits.shape}")
+        print(f"Output logits (first 10 values): {logits[0, :10]}")
+        print(f"\nAuxiliary info: {aux}")
+    else:
+        print(f"\nOutput shape: {output.shape}")
+        print(f"Output (first 10 values): {output[0, :10]}")
