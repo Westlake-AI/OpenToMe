@@ -7,9 +7,9 @@ export TOKENIZER_NAME=blt
 echo $BACKBONE
 echo $TOKENIZER_NAME
 
-NNODE=1 NGPU=4 LOG_RANK=0 bash train.sh \
+NNODE=1 NGPU=8 LOG_RANK=0 bash train.sh \
   --job.config_file flame/models/fla.toml \
-  --job.dump_folder exp/byte/transformers_batch1.seqlen32768.grad_acc4.warmup2048.update1.steps20480.4gpus.lr1e-3 \
+  --job.dump_folder exp/byte/transformers_batch1.seqlen32768.grad_acc2.warmup2048.update1.steps30720.8gpus.lr1e-3 \
   --model.config configs/transformer_340M.json \
   --model.tokenizer_path /yuchang/lsy_jx/.cache/models/transformer-1.3B-100B \
   --optimizer.name AdamW \
@@ -22,7 +22,7 @@ NNODE=1 NGPU=4 LOG_RANK=0 bash train.sh \
   --training.seq_len 32768 \
   --training.context_len 4096 \
   --training.varlen \
-  --training.gradient_accumulation_steps 4 \
+  --training.gradient_accumulation_steps 2 \
   --training.steps 30720 \
   --training.max_norm 1.0 \
   --training.skip_nan_inf \

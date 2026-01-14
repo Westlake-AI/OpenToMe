@@ -7,7 +7,7 @@ echo $BACKBONE
 
 NNODE=1 NGPU=8 LOG_RANK=0 bash train.sh \
   --job.config_file flame/models/fla.toml \
-  --job.dump_folder exp/gated_deltanet_340M-10B/batch1.seqlen32768.grad_acc2.warmup1024.update1.steps30720.lr4e-4 \
+  --job.dump_folder exp/gated_deltanet_340M-10B/batch1.seqlen32768.grad_acc2.warmup1024.update1.steps30720.8gpus.lr4e-4 \
   --model.config configs/gated_deltanet_340M.json \
   --model.tokenizer_path /yuchang/lsy_jx/.cache/models/delta_net-1.3B-100B \
   --optimizer.name AdamW \
