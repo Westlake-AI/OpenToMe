@@ -19,7 +19,7 @@ import time
 import torch
 
 # ------ jinxin added ------ #
-backbone = os.environ.get("BACKBONE", None)
+backbone = os.environ.get("BACKBONE", "None")
 print("*" * 50)
 if "gated_deltanet" in backbone:
     print("Gated-DeltaNet")

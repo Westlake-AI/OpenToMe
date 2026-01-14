@@ -8,7 +8,7 @@ EXP_NAME=cifar100_mergenet_small_260113
 export CUDA_LAUNCH_BLOCKING=1
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
-CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 in1k_trainer.py \
+CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node=1 in1k_trainer.py \
   --data_dir ${DATA_DIR} \
   --dataset CIFAR100 \
   --train_split train \
@@ -25,7 +25,7 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 in1k_trainer.p
   --total_merge_latent 0 \
   --num_local_blocks 1 \
   --local_block_window 32 \
-  --batch_size 128 \
+  --batch_size 100 \
   --epochs 200 \
   --lr 3e-4 \
   --weight_decay 0.05 \

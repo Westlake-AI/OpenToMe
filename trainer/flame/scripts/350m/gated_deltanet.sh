@@ -2,19 +2,19 @@
 
 export HF_ENDPOINT=https://hf-mirror.com
 
-export BACKBONE=delta_net_340M
+export BACKBONE=gated_deltanet_340M
 echo $BACKBONE
 
 NNODE=1 NGPU=8 LOG_RANK=0 bash train.sh \
   --job.config_file flame/models/fla.toml \
-  --job.dump_folder exp/delta_net_340M_10B/batch1.seqlen32768.grad_acc2.warmup1024.update1.steps20480.lr4e-4 \
-  --model.config configs/delta_net_340M.json \
+  --job.dump_folder exp/gated_deltanet_340M-10B/batch1.seqlen32768.grad_acc2.warmup1024.update1.steps30720.lr4e-4 \
+  --model.config configs/gated_deltanet_340M.json \
   --model.tokenizer_path /yuchang/lsy_jx/.cache/models/delta_net-1.3B-100B \
   --optimizer.name AdamW \
   --optimizer.eps 1e-15 \
-  --optimizer.lr 3e-4 \
+  --optimizer.lr 4e-4 \
   --lr_scheduler.warmup_steps 1024 \
-  --lr_scheduler.lr_min 0.1 \
+  --lr_scheduler.lr_min 0.075 \
   --lr_scheduler.decay_type cosine \
   --training.batch_size 1 \
   --training.seq_len 32768 \
