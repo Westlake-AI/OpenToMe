@@ -235,6 +235,7 @@ class LatentEncoder(nn.Module):
         # 统一在 HybridToMeModel 中进行 apply_patch（去除未使用占位字段）
 
         # LatentEncoder receives pre-embedded tokens, so these parameters are removed
+        self.vit.pos_embed.requires_grad = False
         self.vit.patch_embed = nn.Identity()
         # LatentEncoder should not use cls_token
         if hasattr(self.vit, 'cls_token') and self.vit.cls_token is not None:

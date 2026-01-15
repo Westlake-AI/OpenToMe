@@ -4,12 +4,12 @@
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
-DATA_DIR=/liziqing/yuhao/yukai/data/
+DATA_DIR=/yuchang/lsy/data/cifar100/
 OUTPUT_DIR=./work_dirs/classification
 EXP_NAME=cifar100_mergenet_small_260115
 
 
-CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun --standalone --nproc_per_node=8 "${SCRIPT_DIR}/in1k_trainer.py" \
+CUDA_VISIBLE_DEVICES=0,1 TORCH_DISTRIBUTED_DEBUG=DETAIL torchrun --standalone --nproc_per_node 2 "${SCRIPT_DIR}/in1k_trainer.py" \
   --data_dir ${DATA_DIR} \
   --dataset CIFAR100 \
   --train_split train \
