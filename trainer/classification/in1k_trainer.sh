@@ -9,7 +9,7 @@ RESUME_PATH="/yuchang/yk/OpenToMe/trainer/classification/work_dirs/classificatio
 export CUDA_LAUNCH_BLOCKING=1
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 
-CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 in1k_trainer.py \
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 /liziqing/yuhao/yukai/OpenToMe/trainer/classification/in1k_trainer.py \
   --data_dir ${DATA_DIR} \
   --dataset ImageFolder \
   --train_split train \

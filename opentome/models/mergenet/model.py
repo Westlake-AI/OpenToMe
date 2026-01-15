@@ -291,7 +291,7 @@ class HybridToMeModel(nn.Module):
                  tome_use_naive_local=False, 
                  num_classes=1000, 
                  dtem_window_size: int = None, 
-                 dtem_r: int = 2, 
+                #  dtem_r: int = 2, 
                  dtem_t: int = 1,
                  lambda_local: float = 2.0,
                  total_merge_latent: int = 4,
@@ -299,6 +299,7 @@ class HybridToMeModel(nn.Module):
                  num_local_blocks: int = 0,
                  local_block_window: int = 16,
                  pretrained=None,
+                 swa_size: int = None,
                  **kwargs):
         super().__init__()
 
@@ -332,7 +333,7 @@ class HybridToMeModel(nn.Module):
         self.total_merge_latent = total_merge_latent
         self.tome_window_size = tome_window_size
         self.dtem_t = dtem_t
-        self.dtem_r = dtem_r
+        # self.dtem_r = dtem_r
         self.tome_use_naive_local = bool(tome_use_naive_local)
         self.use_softkmax = use_softkmax
         self.num_local_blocks = num_local_blocks
@@ -369,17 +370,19 @@ class HybridToMeModel(nn.Module):
         trunc_normal_(self.head.weight, std=.02)
         nn.init.zeros_(self.head.bias)
 
+        self.swa_size = swa_size
+
         # 统一 apply_patch
         self._apply_patches(self.dtem_feat_dim, self.dtem_window_size, self.dtem_t, 
-                            self.total_merge_local, self.tome_window_size, self.tome_use_naive_local, self.total_merge_latent, self.use_softkmax)
+                            self.total_merge_local, self.tome_window_size, self.tome_use_naive_local, self.total_merge_latent, self.use_softkmax, self.swa_size)
 
 
-    def _apply_patches(self, dtem_feat_dim, dtem_window_size, dtem_t, total_merge_local, tome_window_size, tome_use_naive_local, total_merge_latent, use_softkmax):
+    def _apply_patches(self, dtem_feat_dim, dtem_window_size, dtem_t, total_merge_local, tome_window_size, tome_use_naive_local, total_merge_latent, use_softkmax, swa_size):
         # DTEM patch
         dtem_r_per_layer = total_merge_local//max(len(self.local.vit.blocks),1)
         # Cross attention 强制启用
         dtem_apply_patch(self.local.vit, feat_dim=dtem_feat_dim, trace_source=True, prop_attn=True,
-                         default_r=dtem_r_per_layer, window_size=dtem_window_size, t=dtem_t, use_softkmax=use_softkmax)
+                         default_r=dtem_r_per_layer, window_size=dtem_window_size, t=dtem_t, use_softkmax=use_softkmax, swa_size=swa_size)
         
         # 记录总merge数，供 parse_r 使用
         self.local.vit._tome_info["total_merge"] = total_merge_local

@@ -331,7 +331,8 @@ parser.add_argument('--torchscript', dest='torchscript', action='store_true',
                     help='convert model torchscript for inference')
 parser.add_argument('--log_wandb', action='store_true', default=False,
                     help='log training and validation metrics to wandb')
-
+parser.add_argument('--swa_size', type=int, default=None,
+                    help='Size of the SWA ensemble (default: None)')
 
 def _parse_args():
     # Do we have a config file to parse?
@@ -420,6 +421,7 @@ def main():
             'local_block_window': args.local_block_window,
             'tome_window_size': args.tome_window_size,
             'tome_use_naive_local': args.tome_use_naive_local,
+            'swa_size': args.swa_size,
         })
     
     model = create_model(args.model, **model_kwargs)

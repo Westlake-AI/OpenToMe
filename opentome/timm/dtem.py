@@ -189,45 +189,36 @@ class DTEMAttention(Attention):
         q, k, v = q.type(torch.float32), k.type(torch.float32), v.type(torch.float32)
         with torch.cuda.amp.autocast(dtype=torch.float32, enabled=True):
             q = q * self.scale
-            window_size = self._tome_info.get("window_size")
+            window_size = self._tome_info.get("swa_size")
+            if window_size is None:
+                window_size = self._tome_info.get("window_size")
             if window_size is not None and window_size > 0:
                 # 尝试使用 triton 实现；失败回退到 naive/flash
                 x_bnc = None
-                # import pdb;pdb.set_trace()
-                try:
-                    from .local_attn_triton import local_attn_sizebias_bhnd
-                    x_bnhd = local_attn_sizebias_bhnd(q, k, v, size, window_size, softmax_scale=1.0)  # (B, N, H, D)
-                    x_bnc = x_bnhd.reshape(B, N, self.num_heads * self.head_dim)
-                    x_bnc = self.attn_drop(x_bnc)
-                    # print(f"✅ Using Triton local attention")
-                except Exception as e_triton:
-                    # 先试 flash，再退回 naive
-                    # print(f"⚠️ Triton failed: {e_triton}")
-                    x_bnc = None
-                    if FLASH_ATTN_AVAILABLE and size is not None:
-                        try:
-                            # 处理 bias：size 可能是 (B, N) 或 (B, N, 1)
-                            size_log = size.squeeze(-1).log() if size.ndim == 3 else size.log()
-                            
-                            # 调用 flash attention (自动处理格式)
-                            # q,k,v: (B, H, N, D)，biased_local_attention 会自动检测并处理
-                            x_out = biased_local_attention(
-                                q, k, v, 
-                                bias=size_log,
-                                local_window=window_size,
-                                dropout_p=self.attn_drop.p,
-                                training=self.training,
-                                x_dtype=x.dtype
-                            )  # 返回格式与输入一致: (B, H, N, D)
-                            
-                            # 转换为 (B, N, C): (B, H, N, D) -> (B, N, H, D) -> (B, N, H*D)
-                            x_bnc = x_out.transpose(1, 2).reshape(B, N, self.num_heads * self.head_dim)
-                            # print(f"✅ Using Flash Attention with local window")
-                        except Exception as e_flash:
-                            # Flash attention 失败，x_bnc 保持 None
-                            import warnings
-                            import traceback
-                            warnings.warn(f"⚠️ Flash Attention failed: {e_flash}\nTraceback: {traceback.format_exc()}. Falling back to naive implementation.", stacklevel=2)
+                if FLASH_ATTN_AVAILABLE and size is not None:
+                    try:
+                        # 处理 bias：size 可能是 (B, N) 或 (B, N, 1)
+                        size_log = size.squeeze(-1).log() if size.ndim == 3 else size.log()
+                        
+                        # 调用 flash attention (自动处理格式)
+                        # q,k,v: (B, H, N, D)，biased_local_attention 会自动检测并处理
+                        x_out = biased_local_attention(
+                            q, k, v, 
+                            bias=size_log,
+                            local_window=window_size,
+                            dropout_p=self.attn_drop.p,
+                            training=self.training,
+                            x_dtype=x.dtype
+                        )  # 返回格式与输入一致: (B, H, N, D)
+                        
+                        # 转换为 (B, N, C): (B, H, N, D) -> (B, N, H, D) -> (B, N, H*D)
+                        x_bnc = x_out.transpose(1, 2).reshape(B, N, self.num_heads * self.head_dim)
+                        # print(f"✅ Using Flash Attention with local window")
+                    except Exception as e_flash:
+                        # Flash attention 失败，x_bnc 保持 None
+                        import warnings
+                        import traceback
+                        warnings.warn(f"⚠️ Flash Attention failed: {e_flash}\nTraceback: {traceback.format_exc()}. Falling back to naive implementation.", stacklevel=2)
                     
                     if x_bnc is None:
                         import warnings
@@ -349,6 +340,17 @@ class DTEMBlock(Block):
             nkhot = nkhot.to(scores.dtype)
             assign = torch.zeros_like(scores).scatter_reduce(-1, _idx, nkhot, reduce='sum')
         else:
+            # 某些情况下 Na 与 Nb 可能相差 1（例如边界填充后 unfold），先对齐长度避免广播错误
+            if Na != Nb:
+                new_len = min(Na, Nb)
+                a = a[:, :new_len, :]
+                b = b[:, :new_len, :]
+                if a_orig_idx is not None:
+                    a_orig_idx = a_orig_idx[:, :new_len]
+                if b_orig_idx is not None:
+                    b_orig_idx = b_orig_idx[:, :new_len]
+                Na = Nb = new_len
+
             padded_b = F.pad(b, (0, 0, window_size, window_size))
             b_windows_unfolded = padded_b.unfold(dimension=1, size=2 * window_size + 1, step=1)
             b_windows = b_windows_unfolded.permute(0, 1, 3, 2)
@@ -823,6 +825,7 @@ def dtem_apply_patch(
     window_size: int = None,
     t: int = 1,
     use_softkmax: bool = False,
+    swa_size: int = None,
 ):
     """
     扩展：
@@ -852,6 +855,7 @@ def dtem_apply_patch(
         "window_size": window_size,
         "t": t,
         "use_softkmax": use_softkmax,
+        "swa_size": swa_size,
     }
     for module in model.modules():
         if isinstance(module, (Block, TimmBlock)):
