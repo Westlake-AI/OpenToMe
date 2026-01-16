@@ -26,21 +26,6 @@ from .sentence_piece_tokenizer import SentencePieceTokenizer
 logger = logging.getLogger(__name__)
 
 
-class MockTokenizer(Tokenizer):
-    n_words: int = 256
-
-    def encode(self, text: str, add_bos: bool, add_eos: bool):
-        return text
-
-    def decode(self, tokens):
-        raise NotImplementedError()
-
-    def get_token_offsets(
-        self, text: str, tokens: list[int] | None = None
-    ) -> tuple[list[str]]:
-        raise NotImplementedError()
-
-
 class TokenizerArgs(BaseModel):
     name: str = "bytes"
     init_kwargs: dict[str, Any] | None = None
@@ -54,7 +39,6 @@ class TokenizerArgs(BaseModel):
             return BltTokenizer(**init_kwargs)
         elif self.name == "mock":
             raise ValueError("TODO.")
-            return MockTokenizer(**init_kwargs)
         elif self.name == "sp":
             assert has_sp, "sentencepiece not installed"
             return SentencePieceTokenizer(**init_kwargs)

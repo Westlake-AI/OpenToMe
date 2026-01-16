@@ -61,6 +61,11 @@ elif "transformer++" in backbone:
 else:
     print("None")
 print("*" * 50)
+tokenizer_name = os.environ.get("TOKENIZER_NAME", "default")
+print(f"Tokenizer name: {tokenizer_name}")
+print("*" * 50)
+
+from opentome.tokenizer.build_tokenizer import TokenizerArgs
 
 if TYPE_CHECKING:
     from transformers.quantizers.auto import AutoQuantizationConfig
@@ -805,9 +810,22 @@ class HFLM(TemplateLM):
             else:
                 # get the HF hub name via accessor on model
                 model_name = self.model.name_or_path
-            self.tokenizer = transformers.AutoTokenizer.from_pretrained(
-                model_name, **kwargs
-            )
+            # self.tokenizer = transformers.AutoTokenizer.from_pretrained(
+            #     model_name, **kwargs
+            # )
+            # ---------- jinxin: modified tokenizer loading---------- #
+            if tokenizer_name == "default":   # BPE Tokenizer
+                self.tokenizer = transformers.AutoTokenizer.from_pretrained(
+                    model_name, **kwargs
+                )
+            elif tokenizer_name == "blt":
+                # BLT tokenizer
+                from opentome.tokenizer.blt_tokenizer import BltTokenizer
+                self.tokenizer = BltTokenizer.from_pretrained(
+                    model_name
+                )
+            else:
+                raise ValueError(f"Unknown tokenizer_name: {tokenizer_name}")
 
     def _detect_batch_size(self, requests: Sequence | None = None, pos: int = 0):
         if requests:
