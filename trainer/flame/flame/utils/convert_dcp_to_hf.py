@@ -8,14 +8,43 @@ import tempfile
 from datetime import timedelta
 
 import fla  # noqa
-import fla.models.gated_deltanet
-import fla.models.delta_net
 import torch
 import torch.serialization
 from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
 from torchtitan.tools.logging import init_logger, logger
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
+# ------ jinxin added ------ #
+backbone = os.environ.get("BACKBONE", "None")
+print("*" * 50)
+if "gated_deltanet" in backbone:
+    print("Gated-DeltaNet")
+    import opentome.models.gated_deltanet
+elif "delta_net" in backbone:
+    print("DeltaNet")
+    import opentome.models.delta_net
+elif "gla" in backbone:
+    print("GLA")
+    import opentome.models.gla
+elif "transformer++" in backbone:
+    print("Transformer++")
+    import opentome.models.transformer
+elif "qwen3_next" in backbone:
+    print("Qwen3-NeXt")
+    import opentome.models.qwen3_next
+elif "blt" in backbone:
+    print("BLT")
+    import opentome.models.blt
+else:
+    print("None")
+tokenizer_name = os.environ.get("TOKENIZER_NAME", "default")
+print(f"Tokenizer name: {tokenizer_name}")
+print("*" * 50)
+
+# from ipdb import set_trace as point
+from opentome.tokenizer.build_tokenizer import TokenizerArgs
+
+# ------ End of jinxin added ------ #
 
 @torch.inference_mode()
 def save_pretrained(
@@ -30,9 +59,30 @@ def save_pretrained(
     logger.info(f"Saving the config to {path}")
     config.save_pretrained(path)
     logger.info(f"Loading the tokenizer from {tokenizer}")
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
+    # tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True)
+    # ------ jinxin ------ #
+    if tokenizer_name =="default":
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer, trust_remote_code=True,)
+    else:
+        assert tokenizer_name in ["bytes", "sentencepiece", "tiktoken", "blt"], f"Invalid tokenizer name: {tokenizer_name}"
+        tokenizer = TokenizerArgs(
+            name=tokenizer_name,
+            init_kwargs={
+                "vocab_size_unit_1": 256,
+                "bpe_delim": False,
+                "bpe_tokenizer_path": tokenizer,
+                "add_bos": True,
+                "add_eos": True,
+            }
+        ).build()
     logger.info(f"Saving the tokenizer to {path}")
     tokenizer.save_pretrained(path)
+
+    if tokenizer_name =="default":
+        config.vocab_size = max(tokenizer.vocab_size, config.vocab_size)
+    else:
+        assert tokenizer_name in ["bytes", "sentencepiece", "tiktoken", "blt"], f"Invalid tokenizer name: {tokenizer_name}"
+        config.vocab_size = tokenizer.get_vocab_size()
 
     with tempfile.TemporaryDirectory() as tmpdir:
         checkpoint = os.path.join(path, f'checkpoint/step-{step}')

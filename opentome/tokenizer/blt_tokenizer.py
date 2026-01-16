@@ -1,5 +1,7 @@
 # Copyright (c) Meta Platforms, Inc. and affiliates.
 import re
+import json
+import os
 
 from .abstract_tokenizer import Tokenizer
 from .constants import (
@@ -80,6 +82,7 @@ class BltTokenizer(Tokenizer):
         bpe_tokenizer_path="/home/artidoro/tokenizers/llama_v2.tokenizer.model",
         add_bos: bool = True,
         add_eos: bool = True,
+        offsetting_special_char: int = OFFSET
     ):
         self.add_bos = add_bos
         self.add_eos = add_eos
@@ -97,15 +100,22 @@ class BltTokenizer(Tokenizer):
         else:
             self.bpe_tokenizer = None
         self.bpe_delim = bpe_delim
-        self.offsetting_special_char = OFFSET
+        # self.offsetting_special_char = OFFSET
+        self.offsetting_special_char = offsetting_special_char
         self.vocab_size_unit_1 = vocab_size_unit_1
         self.n_words = vocab_size_unit_1 + self.offsetting_special_char
 
-
-         # ---- HF-compatible aliases ----
+        # ---- HF-compatible aliases ----
         self.bos_token_id = self.bos_id
         self.eos_token_id = self.eos_id
         self.pad_token_id = self.pad_id
+
+        self.bos_token = "<bos>"
+        self.eos_token = "<eos>"
+        self.pad_token = "<pad>"
+
+        self.unk_token_id = None
+        self.unk_token = None
 
         # optional but recommended
         self.unk_token_id = None
@@ -152,22 +162,77 @@ class BltTokenizer(Tokenizer):
 
     def get_vocab_size(self) -> int:
         return self.n_words
+    
+    def vocab_size(self) -> int:
+        return self.get_vocab_size()
+    
+    
+    @classmethod
+    def from_pretrained(cls, load_directory):
+
+        with open(
+            os.path.join(load_directory, "tokenizer_config.json")
+        ) as f:
+            cfg = json.load(f)
+
+        # 只有 BPE 模式才加载 sentencepiece
+        if cfg.get("bpe_delim", False):
+            cfg["bpe_tokenizer_path"] = os.path.join(
+                load_directory, cfg["bpe_tokenizer_path"]
+            )
+
+        return cls(**cfg)
+
+
+    def save_pretrained(self, save_directory):
+        os.makedirs(save_directory, exist_ok=True)
+
+        config = {
+            "vocab_size_unit_1": self.vocab_size_unit_1,
+            "bpe_delim": self.bpe_delim,
+            "add_bos": self.add_bos,
+            "add_eos": self.add_eos,
+            "offsetting_special_char": self.offsetting_special_char,
+        }
+
+        if self.bpe_delim:
+            config["bpe_tokenizer_path"] = self.bpe_tokenizer_path
+
+        with open(
+            os.path.join(save_directory, "tokenizer_config.json"), "w"
+        ) as f:
+            json.dump(config, f, indent=2)
+
+        if self.bpe_delim:
+            import shutil
+            shutil.copy(
+                self.bpe_tokenizer_path,
+                os.path.join(save_directory, "tokenizer.model"),
+            )
+
+        print(f"Tokenizer saved to {save_directory}")
 
     def encode(
-        self, text: str, add_bos: bool | None = None, add_eos: bool | None = None
+        self,
+        text: str,
+        add_bos: bool | None = None,
+        add_eos: bool | None = None,
+        add_special_tokens: bool = True,
     ):
-        # ------ jinxin ------ #
         if not isinstance(text, str):
             raise TypeError(
                 f"BltTokenizer.encode expects str, got {type(text)}"
             )
+
+        if add_special_tokens is False:
+            add_bos = False
+            add_eos = False
 
         if add_bos is None:
             add_bos = self.add_bos
         if add_eos is None:
             add_eos = self.add_eos
 
-        # print(text)
         if self.bpe_delim:
             tokens = text2bytes_bpe_delims(
                 text,
@@ -180,7 +245,6 @@ class BltTokenizer(Tokenizer):
         else:
             tokens = bytes(text, encoding="utf-8", errors="ignore")
 
-        # Offsetting
         tokens = [int(unit) + self.offsetting_special_char for unit in tokens]
 
         if add_bos:
@@ -206,9 +270,26 @@ class BltTokenizer(Tokenizer):
         token_ids,
         skip_special_tokens: bool = True,
     ):
+        # ---- HF compatibility ----
+
+        # 1) single token
+        if isinstance(token_ids, int):
+            token_ids = [token_ids]
+
+        # 2) batch passed mistakenly
+        if (
+            isinstance(token_ids, (list, tuple))
+            and len(token_ids) > 0
+            and isinstance(token_ids[0], (list, tuple))
+        ):
+            return self.batch_decode(
+                token_ids, skip_special_tokens=skip_special_tokens
+            )
+
+        # 3) normal path
         if not isinstance(token_ids, (list, tuple)):
             raise TypeError(
-                f"decode expects List[int], got {type(token_ids)}"
+                f"decode expects int or List[int], got {type(token_ids)}"
             )
 
         return self._decode_single(
@@ -227,21 +308,6 @@ class BltTokenizer(Tokenizer):
             self._decode_single(seq, skip_special_tokens=skip_special_tokens)
             for seq in sequences
         ]
-
-
-    # def decode(self, tokens: list[int], cut_at_eos: bool = False):
-    #     if cut_at_eos:
-    #         for k, t in enumerate(tokens):
-    #             if t == self.eos_id:
-    #                 tokens = tokens[: k + 1]
-    #                 break
-    #     return bytes(
-    #         [
-    #             tok - self.offsetting_special_char
-    #             for tok in tokens
-    #             if tok - self.offsetting_special_char >= 0
-    #         ]
-    #     ).decode("utf-8", errors="ignore")
 
     def get_token_offsets(self, text: str, tokens: list[int] | None = None):
         # TODO: Figure out what this does
