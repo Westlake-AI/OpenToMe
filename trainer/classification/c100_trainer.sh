@@ -24,11 +24,11 @@ CUDA_VISIBLE_DEVICES=0,1 TORCH_DISTRIBUTED_DEBUG=DETAIL torchrun --standalone --
   --lambda_local 4.0 \
   --total_merge_latent 0 \
   --num_local_blocks 1 \
-  --batch_size 64 \
+  --batch_size 32 \
   --epochs 200 \
   --lr 3e-4 \
   --weight_decay 0.05 \
-  --dtem_window_size 24 \
+  --dtem_window_size 32 \
   --sched cosine \
   --warmup_epochs 20 \
   --mixup 0.8 \
@@ -41,4 +41,4 @@ CUDA_VISIBLE_DEVICES=0,1 TORCH_DISTRIBUTED_DEBUG=DETAIL torchrun --standalone --
   --experiment ${EXP_NAME} \
   --seed 42 \
   --use_softkmax \
-  --swa_size 128
+  --swa_size 256

@@ -282,8 +282,15 @@ class HybridToMeModel(nn.Module):
                          'num_heads': 6,
                          'mlp_ratio': 4.0
                         }),
+        **dict.fromkeys(['s_ext', 'small_extend'],
+                        {'embed_dims': 384,
+                         'local_depth': 4,
+                         'latent_depth': 12,
+                         'num_heads': 6,
+                         'mlp_ratio': 4.0
+                        }),
     }  # yapf: disable
-#test
+
     def __init__(self, 
                  arch='base',
                  img_size=224, 
@@ -513,8 +520,10 @@ class HybridToMeModel(nn.Module):
             # 使用 scatter_ 在最后一个维度上更新 bias[:, 1:, :]
             bias[:, 1:, :].scatter_(2, j_positions_safe, log_source_masked)
         
-        # Down Sample
-        x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias)
+        # # Down Sample
+        # x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias)
+        x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias) + topk_x
+
         # 阶段3：LatentEncoder（ToMe硬合并）
         x_latent, size_latent, info_latent = self.latent(x_trace, size_trace)
         token_map_tome = info_latent.get("source_map", None)
@@ -609,11 +618,15 @@ class CLSHybridToMeModel(HybridToMeModel):
             bias[:, 1:, :].scatter_(2, j_positions_safe, log_source_masked)
         
         # Down Sample
-        x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias)
-        x_latent, size_latent, info_latent = self.latent(x_trace, size_trace)
+        # print('topk_x', topk_x.shape, 'x_embed', x_embed.shape)
+        # x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias)
+        x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias) + topk_x
 
-        # cls_token_repr = x_latent[:, 0]
-        cls_token_repr = x_latent.mean(dim=1)
+        x_latent, size_latent, info_latent = self.latent(x_trace, size_trace)
+        # print('x_latent', x_latent.shape, 'size_latent', size_latent.shape)
+
+        cls_token_repr = x_latent[:, 0]  # use cls token
+        # cls_token_repr = x_latent.mean(dim=1)  # use mean pooling
         logits = self.head(cls_token_repr)
 
         aux = {"token_counts_local": info_local.get("token_counts_local", None)}
@@ -647,6 +660,13 @@ def hybridtomevit_small_cls(pretrained=False, **kwargs):
     model = CLSHybridToMeModel(arch='small', remove_decoder_cross_attention=True, **kwargs)
     return model
 
+@register_model
+def hybridtomevit_small_cls_ext(pretrained=False, **kwargs):
+    """HybridToMe ViT Small model"""
+    model = CLSHybridToMeModel(arch='s_ext', remove_decoder_cross_attention=True, **kwargs)
+    return model
+
+
 # python /yuchang/yk/benchmark_scaleup.py --devices cuda:0 --lengths 64000,128000,256000,512000,1024000,2048000,4096000 --num_workers 8 --model_name resnet50 --model_path /yuchang/yk/resnet50_mixup.pth
 
 
@@ -667,12 +687,13 @@ if __name__ == '__main__':
         dtem_r=2,
         dtem_t=1,
         lambda_local=4.0,
-        total_merge_latent=4,
+        total_merge_latent=0,
         use_softkmax=False,
         num_local_blocks=0,
         local_block_window=32,
         tome_window_size=32,
         tome_use_naive_local=False,
+        swa_size=None,
     )
     # Set model to eval mode for inference
     model.eval()
