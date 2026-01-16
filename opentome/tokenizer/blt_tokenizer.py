@@ -120,7 +120,7 @@ class BltTokenizer(Tokenizer):
         # optional but recommended
         self.unk_token_id = None
 
-    # ------ jinxin: 为了兼容HF的batch-wise encode ------ #
+
     def __call__(
         self,
         text,
@@ -175,7 +175,6 @@ class BltTokenizer(Tokenizer):
         ) as f:
             cfg = json.load(f)
 
-        # 只有 BPE 模式才加载 sentencepiece
         if cfg.get("bpe_delim", False):
             cfg["bpe_tokenizer_path"] = os.path.join(
                 load_directory, cfg["bpe_tokenizer_path"]
