@@ -15,6 +15,8 @@ class MergeNetConfig(PretrainedConfig):
             Dimensionality of the encoder layers and the pooler layer.
         num_local_layers (`int`, *optional*, defaults to 4):
             Number of layers in Shared Local Transformer (LoT).
+        num_encoder_layers (`int`, *optional*, defaults to 4):
+            Number of DTEM layers in Local Encoder (LoE). This is the local_depth.
         num_latent_layers (`int`, *optional*, defaults to 8):
             Number of layers in Latent Model (LaM).
         num_heads (`int`, *optional*, defaults to 12):
@@ -79,6 +81,7 @@ class MergeNetConfig(PretrainedConfig):
         vocab_size: int = 320,  # 256 bytes + 64 special tokens offset (BLT default)
         hidden_size: int = 768,
         num_local_layers: int = 4,
+        num_encoder_layers: int = 4,
         num_latent_layers: int = 8,
         num_heads: int = 12,
         num_kv_heads: int | None = None,
@@ -111,6 +114,7 @@ class MergeNetConfig(PretrainedConfig):
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.num_local_layers = num_local_layers
+        self.num_encoder_layers = num_encoder_layers
         self.num_latent_layers = num_latent_layers
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads

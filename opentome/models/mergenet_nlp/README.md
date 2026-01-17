@@ -52,7 +52,8 @@ from opentome.models.mergenet_nlp import MergeNetConfig, MergeNetForCausalLM
 config = MergeNetConfig(
     vocab_size=320,           # 256 bytes + offset
     hidden_size=768,          # Model dimension
-    num_local_layers=4,       # LoT layers
+    num_local_layers=4,       # LoT layers (no DTEM)
+    num_encoder_layers=4,     # LoE DTEM layers (local_depth)
     num_latent_layers=8,      # LaM layers
     num_heads=12,
     lambda_local=4.0,         # Compression ratio
@@ -105,16 +106,17 @@ generated = model.generate(
 
 ## Model Sizes
 
-| Model | Hidden | Layers (L+L) | Params | Description |
-|-------|--------|--------------|--------|-------------|
-| Small | 384 | 4+8 | ~50M | Fast, lightweight |
-| Base | 768 | 4+8 | ~200M | Balanced performance |
-| Large | 1024 | 6+12 | ~500M | High capacity |
+| Model | Hidden | Layers (LoT+LoE+LaM) | Params | Description |
+|-------|--------|----------------------|--------|-------------|
+| Small | 384 | 4+4+8 | ~50M | Fast, lightweight |
+| Base | 768 | 4+4+8 | ~200M | Balanced performance |
+| Large | 1024 | 6+6+12 | ~500M | High capacity |
 
 ## Implementation Details
 
 ### Source Matrix Tracking
-- Shape: (B, N, width) where width = 2 × window_size × num_local_layers + 1
+- Shape: (B, N, width) where width = 2 × window_size × local_depth + 1
+- `local_depth` = `num_encoder_layers` (number of DTEM blocks in LoE)
 - Sparse band matrix storing byte-to-token provenance
 - Used for Perceiver bias: `log(source_matrix)`
 

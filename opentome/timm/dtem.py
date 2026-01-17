@@ -534,28 +534,47 @@ class DTEMBlock(Block):
             physical_mask = valid_mask.clone()  # Start with valid_mask
             if a_orig_idx is not None and b_orig_idx is not None:
                 # For each a[i], check if |a_orig_idx[i] - b_orig_idx[b_indices[i,j]]| <= window_size
-                # a_orig_idx: (B, Na) -> (B, Na, 1)
-                # b_indices: (1, Na, 2*window_size+1)
-                # b_orig_idx: (B, Nb)
+                # NOTE: a_orig_idx and b_orig_idx may have been aligned in _select if Na != Nb
+                # So their shape[1] may be min(Na, Nb), not the original Na/Nb
+                # a_orig_idx: (B, Na_aligned) -> (B, Na_aligned, 1)
+                # b_indices: (1, Na, 2*window_size+1)  
+                # b_orig_idx: (B, Nb_aligned)
                 
-                a_orig_expanded = a_orig_idx.unsqueeze(2)  # (B, Na, 1)
-                b_indices_clamped = b_indices.clamp(0, Nb_cur - 1)  # (1, Na, 2*window_size+1)
-                b_indices_expanded = b_indices_clamped.expand(B_cur, -1, -1)  # (B, Na, 2*window_size+1)
+                # Use actual shapes from orig_idx tensors
+                Na_aligned = a_orig_idx.shape[1]
+                Nb_aligned = b_orig_idx.shape[1]
                 
-                # Gather b's original positions at window indices
-                # b_orig_idx: (B, Nb) -> expand to (B, Na, Nb) -> gather with index (B, Na, 2*w+1)
-                batch_idx = torch.arange(B_cur, device=b_orig_idx.device).view(-1, 1, 1)  # (B, 1, 1)
-                b_orig_at_window = b_orig_idx[batch_idx, b_indices_expanded]  # (B, Na, 2*w+1)
-                
-                # Check physical distance
-                physical_distance = torch.abs(a_orig_expanded - b_orig_at_window)  # (B, Na, 2*w+1)
-                physical_local_mask = physical_distance <= window_size  # (B, Na, 2*w+1)
-                
-                # Combine with valid_mask
-                physical_mask = valid_mask & physical_local_mask  # (B, Na, 2*w+1)
+                # Only proceed if aligned sizes match current assign shape
+                if Na_aligned == Na_cur:
+                    a_orig_expanded = a_orig_idx.unsqueeze(2)  # (B, Na_aligned, 1)
+                    # Clamp b_indices to valid range of b_orig_idx
+                    b_indices_clamped = b_indices.clamp(0, Nb_aligned - 1)  # (1, Na, 2*window_size+1)
+                    b_indices_expanded = b_indices_clamped.expand(B_cur, -1, -1)  # (B, Na, 2*window_size+1)
+                    
+                    # If Na from b_indices doesn't match Na_aligned, truncate
+                    if b_indices_expanded.shape[1] > Na_aligned:
+                        b_indices_expanded = b_indices_expanded[:, :Na_aligned, :]
+                    
+                    # Ensure indices are within bounds
+                    b_indices_expanded = b_indices_expanded.clamp(0, Nb_aligned - 1)
+                    
+                    # Gather b's original positions at window indices
+                    b_orig_expanded = b_orig_idx.unsqueeze(1).expand(-1, Na_aligned, -1)  # (B, Na_aligned, Nb_aligned)
+                    b_orig_at_window = torch.gather(
+                        b_orig_expanded,  # (B, Na_aligned, Nb_aligned)
+                        dim=2,
+                        index=b_indices_expanded  # (B, Na_aligned, 2*window_size+1)
+                    )  # (B, Na_aligned, 2*w+1)
+                    
+                    # Check physical distance
+                    physical_distance = torch.abs(a_orig_expanded - b_orig_at_window)  # (B, Na_aligned, 2*w+1)
+                    physical_local_mask = physical_distance <= window_size  # (B, Na_aligned, 2*w+1)
+                    
+                    # Combine with valid_mask
+                    physical_mask = valid_mask & physical_local_mask  # (B, Na, 2*w+1)
             
-            # Apply physical mask to assign
-            assign = assign * physical_mask.float()
+            # Apply physical mask to assign (use same dtype as assign)
+            assign = assign * physical_mask.to(assign.dtype)
             
             # Clamp indices for scatter operation
             b_indices_clamped = b_indices.clamp(0, Nb_cur - 1)  # (1, Na, 2*window_size+1)
@@ -649,8 +668,8 @@ class DTEMBlock(Block):
                 valid_target = (target_k >= 0) & (target_k < width)
                 target_k_clamped = target_k.clamp(0, width - 1)
                 
-                # Apply valid mask
-                transferred_masked = transferred * valid_target.float()
+                # Apply valid mask (use same dtype as transferred)
+                transferred_masked = transferred * valid_target.to(transferred.dtype)
                 
                 # Scatter to source_b using b_indices
                 batch_idx = torch.arange(B_cur, device=x.device).view(-1, 1, 1, 1)

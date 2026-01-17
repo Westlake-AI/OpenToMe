@@ -16,8 +16,9 @@ def create_model_example():
     config = MergeNetConfig(
         vocab_size=320,  # 256 bytes + 64 offset
         hidden_size=384,  # Small model
-        num_local_layers=4,
-        num_latent_layers=8,
+        num_local_layers=4,  # LoT layers
+        num_encoder_layers=4,  # LoE DTEM layers (local_depth)
+        num_latent_layers=8,  # LaM layers
         num_heads=6,
         num_kv_heads=6,
         intermediate_size=1536,
@@ -42,11 +43,17 @@ def training_example():
     model, config = create_model_example()
     model.eval()  # For this example
     
+    # Move to GPU if available and convert to bfloat16 (FlashAttention requirement)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+    print(f"Using device: {device}, dtype: {dtype}")
+    model = model.to(device=device, dtype=dtype)
+    
     # Create dummy input (batch_size=2, seq_len=128)
     batch_size = 2
     seq_len = 128
-    input_ids = torch.randint(0, config.vocab_size, (batch_size, seq_len))
-    labels = torch.randint(0, config.vocab_size, (batch_size, seq_len))
+    input_ids = torch.randint(0, config.vocab_size, (batch_size, seq_len), device=device)
+    labels = torch.randint(0, config.vocab_size, (batch_size, seq_len), device=device)
     
     print(f"Input shape: {input_ids.shape}")
     
@@ -69,6 +76,12 @@ def generation_example():
     model, config = create_model_example()
     model.eval()
     
+    # Move to GPU if available and convert to bfloat16 (FlashAttention requirement)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
+    print(f"Using device: {device}, dtype: {dtype}")
+    model = model.to(device=device, dtype=dtype)
+    
     # Create prompt
     prompt_text = "Hello, world!"
     # Simulate byte tokenization (replace with actual BltTokenizer in practice)
@@ -80,7 +93,7 @@ def generation_example():
     bos_id = config.bos_token_id
     prompt_ids = [bos_id] + prompt_ids
     
-    input_ids = torch.tensor([prompt_ids], dtype=torch.long)
+    input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
     
     print(f"Prompt: '{prompt_text}'")
     print(f"Prompt IDs: {input_ids.shape}")
@@ -115,16 +128,18 @@ def model_architecture_summary():
     print(f"Configuration:")
     print(f"  - Hidden size: {config.hidden_size}")
     print(f"  - Local layers (LoT): {config.num_local_layers}")
+    print(f"  - Encoder layers (LoE): {config.num_encoder_layers}")
     print(f"  - Latent layers (LaM): {config.num_latent_layers}")
     print(f"  - Compression ratio (lambda): {config.lambda_local}")
     print(f"  - DTEM window size: {config.dtem_window_size}")
     print()
     print(f"Model Components:")
     print(f"  1. Shared Local Transformer (LoT)")
-    print(f"     - Extracts local byte-level context")
+    print(f"     - Extracts local byte-level context (no DTEM)")
     print(f"     - Layers: {config.num_local_layers}")
     print(f"  2. Local Encoder (LoE)")
     print(f"     - Soft token merging with DTEM")
+    print(f"     - DTEM layers: {config.num_encoder_layers} (local_depth)")
     print(f"     - Compresses L tokens to ~L/{config.lambda_local} tokens")
     print(f"  3. Latent Model (LaM)")
     print(f"     - Pure GPT transformer on latent words")

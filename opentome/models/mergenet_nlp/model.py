@@ -12,13 +12,28 @@ from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import logging
 
 from fla.layers.attn import Attention
-from fla.modules import RMSNorm
 from fla.modules import GatedMLP as TransformerMLP
+
+# Use fla's fused RMSNorm if CUDA is available (faster), otherwise fallback to PyTorch native
+try:
+    from fla.modules import RMSNorm as FLARMSNorm
+    _use_fla_rmsnorm = torch.cuda.is_available()
+except ImportError:
+    _use_fla_rmsnorm = False
+
+def get_rmsnorm(hidden_size, eps=1e-6):
+    """Get RMSNorm implementation based on device availability."""
+    if _use_fla_rmsnorm:
+        return FLARMSNorm(hidden_size, eps=eps)
+    else:
+        # Fallback to PyTorch native (torch 2.4+)
+        return nn.RMSNorm(hidden_size, eps=eps)
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules.l2warp import l2_warp
 
 from opentome.models.modeling_layers import GradientCheckpointingLayer
 from opentome.timm.dtem import DTEMBlock, DTEMAttention
+from opentome.timm.attention import Attention as TimmAttention, Block as TimmBlock
 from opentome.tome.tome import parse_r
 
 from .configuration_mergenet import MergeNetConfig
@@ -115,7 +130,8 @@ class TransformerBlock(GradientCheckpointingLayer):
         self.config = config
         self.layer_idx = layer_idx
 
-        self.attn_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
+        # Use fla's fused RMSNorm if GPU available (faster), else PyTorch native
+        self.attn_norm = get_rmsnorm(config.hidden_size, eps=config.norm_eps)
         self.attn = Attention(
             hidden_size=config.hidden_size,
             num_heads=config.num_heads,
@@ -128,7 +144,7 @@ class TransformerBlock(GradientCheckpointingLayer):
             layer_idx=layer_idx,
         )
 
-        self.mlp_norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
+        self.mlp_norm = get_rmsnorm(config.hidden_size, eps=config.norm_eps)
         self.mlp = TransformerMLP(
             hidden_size=config.hidden_size,
             hidden_ratio=None,
@@ -195,7 +211,7 @@ class SharedLocalTransformer(nn.Module):
         ])
         
         # Final norm
-        self.norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
+        self.norm = get_rmsnorm(config.hidden_size, eps=config.norm_eps)
         
         self.gradient_checkpointing = False
 
@@ -225,43 +241,49 @@ class SharedLocalTransformer(nn.Module):
 
 
 # =====================================================================
-# 2. Local Encoder (LoE) with DTEM
+# 2. Local Encoder (LoE) with DTEM 
 # =====================================================================
 
 class LocalEncoderNLP(nn.Module):
     """
     Local Encoder: differentiable soft tokenization using DTEM.
-    Performs soft token merging with source matrix tracking.
+    Reuses timm/dtem.py implementation with timm-style Blocks.
     """
 
     def __init__(self, config: MergeNetConfig):
         super().__init__()
         self.config = config
         
-        # Calculate total merge count based on lambda
-        # Target: compress L tokens to L/lambda tokens
-        # So we need to merge: L - L/lambda = L*(1 - 1/lambda) tokens
-        # We'll set this dynamically based on input length
-        
-        # Create DTEM blocks
-        self.blocks = nn.ModuleList([
-            TransformerBlock(config, layer_idx=i)
-            for i in range(config.num_local_layers)
-        ])
-        
-        # Apply DTEM patch to blocks
-        self._apply_dtem_patch(config)
-    
-    def _apply_dtem_patch(self, config: MergeNetConfig):
-        """Apply DTEM patch to transformer blocks for soft merging."""
         # Determine feature dim for metric
         if config.dtem_feat_dim is not None:
             feat_dim = config.dtem_feat_dim
         else:
-            # Auto-determine based on hidden_size
             dim = config.hidden_size
             feat_dim = config.hidden_size // config.num_heads if dim < 1024 else 2 * (config.hidden_size // config.num_heads)
         
+        # Create timm-style Blocks (will be patched to DTEMBlocks)
+        # Note: Using LayerNorm instead of RMSNorm for compatibility with timm
+        self.blocks = nn.ModuleList([
+            TimmBlock(
+                dim=config.hidden_size,
+                num_heads=config.num_heads,
+                mlp_ratio=config.intermediate_size / config.hidden_size,
+                qkv_bias=config.qkv_bias,
+                qk_norm=config.qk_norm,
+                proj_drop=config.drop_rate,
+                attn_drop=config.attn_drop_rate,
+                drop_path=config.drop_path_rate * (i / max(config.num_encoder_layers - 1, 1)),  # Stochastic depth
+                norm_layer=nn.LayerNorm,
+                use_flash_attn=False,  # Will use custom attention in DTEM
+            )
+            for i in range(config.num_encoder_layers)
+        ])
+        
+        # Apply DTEM patch (directly use dtem.py logic)
+        self._apply_dtem_patch(feat_dim)
+    
+    def _apply_dtem_patch(self, feat_dim):
+        """Apply DTEM patch using the existing dtem.py implementation."""
         # Create shared _tome_info dict
         self._tome_info = {
             "r": None,  # Will be set in forward
@@ -273,28 +295,27 @@ class LocalEncoderNLP(nn.Module):
             "prop_attn": True,
             "class_token": False,  # ❗Key: NLP has no cls token
             "distill_token": False,
-            "source_tracking_mode": 'matrix',  # Use matrix for source tracking
-            "window_size": config.dtem_window_size,
-            "t": config.dtem_t,
-            "use_softkmax": config.use_softkmax,
+            "source_tracking_mode": 'matrix',
+            "window_size": self.config.dtem_window_size,
+            "t": self.config.dtem_t,
+            "use_softkmax": self.config.use_softkmax,
             "tau1": 1.0,
-            "tau2": 30.0,  # Temperature for softmax/ThreTopK (higher = smoother)
+            "tau2": 30.0,
             "feat_dim": feat_dim,
-            "local_depth": config.num_local_layers,
-            "swa_size": config.dtem_window_size,  # Sliding window attention size
+            "local_depth": self.config.num_encoder_layers,
+            "swa_size": self.config.dtem_window_size,
         }
         
-        # Patch each block to DTEMBlock
-        for i, block in enumerate(self.blocks):
-            # Convert TransformerBlock to DTEMBlock
+        # Patch blocks to DTEMBlock and attention to DTEMAttention
+        for block in self.blocks:
             block.__class__ = DTEMBlock
             block._tome_info = self._tome_info
             
-            # Patch attention module
+            # Patch attention
             if hasattr(block, 'attn'):
                 block.attn.__class__ = DTEMAttention
                 block.attn._tome_info = self._tome_info
-                # Add metric layer to attention
+                # Add metric layer
                 block.attn.patch(feat_dim)
 
     def forward(self, hidden_states, phase='phase2'):
@@ -312,7 +333,7 @@ class LocalEncoderNLP(nn.Module):
         
         # Calculate total merge count: L - L/lambda
         total_merge = int(L * (1 - 1/self.config.lambda_local))
-        r_per_layer = total_merge // max(self.config.num_local_layers, 1)
+        r_per_layer = total_merge // max(self.config.num_encoder_layers, 1)
         
         # Initialize
         n = L
@@ -330,6 +351,7 @@ class LocalEncoderNLP(nn.Module):
         self._tome_info["token_counts_local"] = []
         
         # Forward through DTEM blocks
+        # DTEMBlock.forward(x, size, n, source_matrix) returns (x, size, n, metric, source_matrix)
         for block in self.blocks:
             hidden_states, size, n, _, source_matrix = block(
                 hidden_states, 
@@ -366,8 +388,8 @@ class LatentModel(nn.Module):
         ])
         
         # Final norm
-        self.norm = RMSNorm(config.hidden_size, eps=config.norm_eps)
-        
+        self.norm = get_rmsnorm(config.hidden_size, eps=config.norm_eps)
+
         self.gradient_checkpointing = False
 
     def forward(self, latent_words, size=None, attention_mask=None):
@@ -436,8 +458,8 @@ class LocalDecoder(nn.Module):
         
         # Construct Band Mask + Grid Bias
         # Grid Bias: -gamma * |t/lambda - j|
-        t_indices = torch.arange(L, device=device, dtype=torch.float32).view(1, L, 1)
-        j_indices = torch.arange(N, device=device, dtype=torch.float32).view(1, 1, N)
+        t_indices = torch.arange(L, device=device, dtype=query_states.dtype).view(1, L, 1)
+        j_indices = torch.arange(N, device=device, dtype=query_states.dtype).view(1, 1, N)
         
         grid_bias = -self.gamma * torch.abs(t_indices / self.lambda_local - j_indices)
         
@@ -446,6 +468,7 @@ class LocalDecoder(nn.Module):
         # j_center = floor(t / lambda), valid range: [j_center - W_infer, j_center]
         band_mask = torch.full((B, L, N), float('-inf'), device=device, dtype=query_states.dtype)
         
+        # loop, see if can be optimized in the future.
         for t in range(L):
             j_center = int(t / self.lambda_local)
             # Causal: can only see up to current position (j <= j_center)
@@ -852,8 +875,20 @@ class MergeNetForCausalLM(MergeNetPreTrainedModel):
                 logits[indices_to_remove] = float('-inf')
             
             # Sample next token
-            probs = torch.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)  # (B, 1)
+            # For safety with untrained models, check for nan/inf
+            if torch.isnan(logits).any() or torch.isinf(logits).any():
+                # Use greedy decoding as fallback
+                next_token = torch.argmax(logits, dim=-1, keepdim=True)  # (B, 1)
+            else:
+                probs = torch.softmax(logits, dim=-1)
+                # Additional safety: clamp probs to avoid numerical issues
+                probs = torch.clamp(probs, min=1e-8, max=1.0)
+                probs = probs / probs.sum(dim=-1, keepdim=True)  # Renormalize
+                try:
+                    next_token = torch.multinomial(probs, num_samples=1)  # (B, 1)
+                except RuntimeError:
+                    # Fallback to greedy if multinomial fails
+                    next_token = torch.argmax(logits, dim=-1, keepdim=True)  # (B, 1)
             
             # Append to generated sequence
             generated = torch.cat([generated, next_token], dim=1)
