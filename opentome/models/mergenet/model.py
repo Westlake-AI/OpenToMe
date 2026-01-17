@@ -11,16 +11,9 @@ from opentome.timm.dtem import dtem_apply_patch, trace_token_merge, token_unmerg
 from opentome.tome.tome import token_unmerge_from_map, parse_r
 from opentome.timm.bias_local_attn import LocalBlock
 
-try:
-    from flash_attn import flash_attn_func
-    FLASH_ATTN_AVAILABLE = True
-except ImportError:
-    FLASH_ATTN_AVAILABLE = False
-    print("Warning: flash_attn not available, falling back to standard attention")
-
 class MyCrossAttention(nn.Module):
     """
-    Implements multi-head cross attention using Flash Attention where query and key/value sequences
+    Implements multi-head cross attention where query and key/value sequences
     can have different lengths and batch sizes.
     
     Args:
@@ -64,10 +57,10 @@ class MyCrossAttention(nn.Module):
         k_proj = self.k_proj(kv) # (Bk, Nk, C)
         v_proj = self.v_proj(kv) # (Bk, Nk, C)
 
-        # Reshape for multi-head: (B, N, C) -> (B, N, num_heads, head_dim)
-        q_proj = q_proj.reshape(Bq, Nq, self.num_heads, self.head_dim)
-        k_proj = k_proj.reshape(Bk, Nk, self.num_heads, self.head_dim)
-        v_proj = v_proj.reshape(Bk, Nk, self.num_heads, self.head_dim)
+        # Reshape for multi-head: (B, N, C) -> (B, num_heads, N, head_dim)
+        q_proj = q_proj.reshape(Bq, Nq, self.num_heads, self.head_dim).transpose(1, 2)
+        k_proj = k_proj.reshape(Bk, Nk, self.num_heads, self.head_dim).transpose(1, 2)
+        v_proj = v_proj.reshape(Bk, Nk, self.num_heads, self.head_dim).transpose(1, 2)
 
         # Handle broadcasting in batch dimension
         if Bq != Bk:
@@ -85,79 +78,32 @@ class MyCrossAttention(nn.Module):
         else:
             B = Bq
 
-        if FLASH_ATTN_AVAILABLE and q_proj.dtype in [torch.float16, torch.bfloat16]:
-            # Use Flash Attention 2
-            # flash_attn_func expects: (batch, seqlen, nheads, headdim)
-            # Input is already in correct shape: (B, N, num_heads, head_dim)
-            
-            try:
-                # Try to use flash_attn with bias support
-                # In newer versions, flash_attn_func supports attn_bias parameter
-                if mask is not None:
-                    # Prepare attention bias
-                    # Flash Attention expects bias in shape (batch, nheads, seqlen_q, seqlen_k)
-                    attn_bias = mask.unsqueeze(1).expand(-1, self.num_heads, -1, -1).contiguous()
-                else:
-                    attn_bias = None
-                
-                context = flash_attn_func(
-                    q_proj, k_proj, v_proj,
-                    dropout_p=self.attn_drop if self.training else 0.0,
-                    softmax_scale=1.0 / (self.head_dim ** 0.5),
-                    causal=False,
-                    deterministic=not self.training,  # Ensure deterministic behavior during eval
-                )  # (B, Nq, num_heads, head_dim)
-                
-                # Note: If your flash_attn version supports attn_bias, add it as a parameter above
-                # flash_attn_func(..., attn_bias=attn_bias)
-                # For versions without native bias support, we fall back when mask is present
-                if mask is not None:
-                    # Fallback to standard attention for mask support
-                    context = self._standard_attention(q_proj, k_proj, v_proj, mask)
-                    
-            except Exception as e:
-                # Fall back to standard attention on any error
-                print(f"Flash Attention failed: {e}, falling back to standard attention")
-                context = self._standard_attention(q_proj, k_proj, v_proj, mask)
-        else:
-            # Fall back to standard attention (wrong dtype or flash_attn not available)
-            context = self._standard_attention(q_proj, k_proj, v_proj, mask)
-
-        # Reshape back to (B, Nq, C)
-        context = context.reshape(B, Nq, self.embed_dim)
-
-        context = self.out_proj(context)
-        context = self.proj_drop(context)
-        return context
-    
-    def _standard_attention(self, q, k, v, mask=None):
-        """
-        Standard attention implementation as fallback
-        Args:
-            q, k, v: (B, N, num_heads, head_dim)
-            mask: (B, Nq, Nk) or None
-        Returns:
-            context: (B, Nq, num_heads, head_dim)
-        """
-        # Transpose to (B, num_heads, N, head_dim) for matmul
-        q = q.transpose(1, 2)  # (B, num_heads, Nq, head_dim)
-        k = k.transpose(1, 2)  # (B, num_heads, Nk, head_dim)
-        v = v.transpose(1, 2)  # (B, num_heads, Nk, head_dim)
+        # Compute attention scores: Q @ K^T / sqrt(d_k)
+        # q_proj: (B, num_heads, Nq, head_dim)
+        # k_proj: (B, num_heads, Nk, head_dim)
+        attn_scores = torch.matmul(q_proj, k_proj.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        # attn_scores: (B, num_heads, Nq, Nk)
         
-        # Compute attention scores
-        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / (self.head_dim ** 0.5)
-        
+        # Apply attention bias/mask if provided
         if mask is not None:
             # mask: (B, Nq, Nk) -> (B, 1, Nq, Nk)
             attn_scores = attn_scores + mask.unsqueeze(1)
         
+        # Softmax and dropout
         attn_probs = torch.softmax(attn_scores, dim=-1)
         attn_probs = torch.nn.functional.dropout(attn_probs, p=self.attn_drop, training=self.training)
         
-        # Weighted sum
-        context = torch.matmul(attn_probs, v)  # (B, num_heads, Nq, head_dim)
-        context = context.transpose(1, 2)  # (B, Nq, num_heads, head_dim)
+        # Weighted sum: attn_probs @ V
+        # attn_probs: (B, num_heads, Nq, Nk)
+        # v_proj: (B, num_heads, Nk, head_dim)
+        context = torch.matmul(attn_probs, v_proj)  # (B, num_heads, Nq, head_dim)
         
+        # Transpose back and reshape: (B, num_heads, Nq, head_dim) -> (B, Nq, C)
+        context = context.transpose(1, 2).reshape(B, Nq, self.embed_dim)
+
+        # Output projection
+        context = self.out_proj(context)
+        context = self.proj_drop(context)
         return context
 
 class LocalEncoder(nn.Module):

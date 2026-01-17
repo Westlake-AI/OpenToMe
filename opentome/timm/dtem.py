@@ -326,7 +326,7 @@ class DTEMBlock(Block):
                 khot = torch.zeros_like(_x)
                 _x_iter = _x.clone()  # Clone to avoid inplace modification
                 for _ in range(k):
-                    onehot_approx = F.softmax(_x_iter.view(B, -1) / (self._tome_info.get("tau2", 0.1)), dim=-1).view(B, Na, Nb)
+                    onehot_approx = F.softmax(_x_iter.view(B, -1) * self._tome_info.get("tau2", 30.0), dim=-1).view(B, Na, Nb)
                     khot += onehot_approx
                     khot_mask = torch.clamp(1 - onehot_approx.sum(dim=-1, keepdim=True), min=EPSILON)
                     _x_iter = _x_iter + torch.log(khot_mask)
@@ -369,7 +369,7 @@ class DTEMBlock(Block):
                 khot = torch.zeros_like(local_scores)
                 local_scores_iter = local_scores.clone()  # Clone to avoid inplace modification
                 for _ in range(k):
-                    onehot_approx = F.softmax(local_scores_iter / (self._tome_info.get("tau2", 0.1)), dim=-1)
+                    onehot_approx = F.softmax(local_scores_iter * self._tome_info.get("tau2", 30.0), dim=-1)
                     khot += onehot_approx
                     khot_mask = torch.clamp(1 - onehot_approx.sum(dim=-1, keepdim=True), min=EPSILON)
                     local_scores_iter = local_scores_iter + torch.log(khot_mask)
@@ -443,8 +443,15 @@ class DTEMBlock(Block):
         B, T, C = x.shape
         device = x.device
         
-        # Random grouping: split tokens (excluding cls) into two groups
-        n_tokens = n - 1  # exclude cls token at position 0
+        # Random grouping: split tokens (excluding cls if present) into two groups
+        has_cls = self._tome_info.get("class_token", True)
+        if has_cls:
+            n_tokens = n - 1  # exclude cls token at position 0
+            offset = 1
+        else:
+            n_tokens = n
+            offset = 0
+        
         Na = n_tokens // 2
         Nb = n_tokens - Na
         
@@ -452,8 +459,8 @@ class DTEMBlock(Block):
         # Use argsort of random values to get permutation
         rand_vals = torch.rand(B, n_tokens, device=device)
         rand_perm = torch.argsort(rand_vals, dim=1)  # [B, n_tokens]
-        a_idx = rand_perm[:, :Na] + 1  # +1 because we skip cls at position 0
-        b_idx = rand_perm[:, Na:] + 1
+        a_idx = rand_perm[:, :Na] + offset  # +offset to skip cls if present
+        b_idx = rand_perm[:, Na:] + offset
 
         # 暂时把 a_idx 和 b_idx 改回奇偶分组
         # a_idx = torch.arange(1, n, 2, device=device).unsqueeze(0).expand(B, -1)
@@ -717,9 +724,14 @@ class DTEMBlock(Block):
 
         # =================================================================================== #
         
-
-        x_output = torch.cat([x[:, :1], nx, x[:, n:]], dim=1)
-        size_output = torch.cat([size[:, :1, 0], w, size[:, n:, 0]], dim=-1).unsqueeze(-1)
+        # Handle cls token if present
+        has_cls = self._tome_info.get("class_token", True)
+        if has_cls:
+            x_output = torch.cat([x[:, :1], nx, x[:, n:]], dim=1)
+            size_output = torch.cat([size[:, :1, 0], w, size[:, n:, 0]], dim=-1).unsqueeze(-1)
+        else:
+            x_output = torch.cat([nx, x[:, n:]], dim=1)
+            size_output = torch.cat([w, size[:, n:, 0]], dim=-1).unsqueeze(-1)
         return x_output, size_output, n , _out, source_matrix
 
     def _merge_eval(self, x, size, r, metric, source_matrix=None):    # eval：保留 ToMe 行为。弃用。
@@ -845,10 +857,10 @@ def dtem_apply_patch(
         "class_token": getattr(model, 'cls_token', None) is not None,
         "distill_token": getattr(model, 'dist_token', None) is not None,
         "source_tracking_mode": source_tracking_mode,
-        "k2": None,
-        "tau1": 1.0,
-        "tau2": 0.1,
-        "feat_dim": feat_dim,
+            "k2": None,
+            "tau1": 1.0,
+            "tau2": 30.0,  # Temperature for softmax/ThreTopK (higher = smoother)
+            "feat_dim": feat_dim,
         "window_size": window_size,
         "t": t,
         "use_softkmax": use_softkmax,
