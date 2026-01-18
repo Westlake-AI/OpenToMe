@@ -187,6 +187,7 @@ class LocalEncoder(nn.Module):
                                      depth=depth, num_heads=num_heads, mlp_ratio=mlp_ratio,
                                      qkv_bias=True, num_classes=0,
                                      drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate)
+        # Note: Pretrained weights loading is handled by HybridToMeModel._load_full_pretrained_weights()
 
     def forward(self, x):
         x = self.vit.patch_embed(x)  # automatically inserted cls_token after patch_embed
@@ -311,6 +312,8 @@ class HybridToMeModel(nn.Module):
                  num_local_blocks: int = 0,
                  local_block_window: int = 16,
                  pretrained=None,
+                 pretrained_type: str = 'vit',
+                 load_full_pretrained: bool = True,
                  swa_size: int = None,
                  **kwargs):
         super().__init__()
@@ -362,7 +365,7 @@ class HybridToMeModel(nn.Module):
                                   r = self.total_merge_local // max(self.local_depth, 1), 
                                   t = self.dtem_t,
                                   num_local_blocks = self.num_local_blocks,
-                                  local_block_window = self.local_block_window
+                                  local_block_window = self.local_block_window,
                                 )
         self.latent = LatentEncoder(self.img_size, self.patch_size, self.embed_dim, self.num_heads, self.mlp_ratio,
                                     depth = self.latent_depth, drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate,
@@ -387,7 +390,89 @@ class HybridToMeModel(nn.Module):
         # 统一 apply_patch
         self._apply_patches(self.dtem_feat_dim, self.dtem_window_size, self.dtem_t, 
                             self.total_merge_local, self.tome_window_size, self.tome_use_naive_local, self.total_merge_latent, self.use_softkmax, self.swa_size)
+        
+        # Load pretrained weights if provided
+        if pretrained:
+            self._load_full_pretrained_weights(pretrained, img_size, pretrained_type, load_full_pretrained)
 
+    def _load_full_pretrained_weights(self, pretrained, img_size, pretrained_type='vit', load_full=True):
+        """
+        Load pretrained weights from timm ViT/DeiT model.
+        
+        Args:
+            pretrained: Model name or True for auto-detection
+            img_size: Image size
+            pretrained_type: 'vit' or 'deit'
+            load_full: If True, load full weights (Local + Latent). If False, only load Local Encoder weights.
+        
+        When load_full=True (default), splits the weights between Local Encoder and Latent Encoder:
+        - Local Encoder (first local_depth blocks): loads blocks.0 to blocks.(local_depth-1)
+        - Latent Encoder (remaining blocks): loads blocks.local_depth to blocks.(local_depth+latent_depth-1) 
+          (mapped to blocks.0 to blocks.(latent_depth-1))
+        
+        For example, DeiT-S has 12 blocks:
+        - load_full=True: Local Encoder (4 blocks) loads blocks.0-3, Latent Encoder (8 blocks) loads blocks.4-11
+        - load_full=False: Only Local Encoder (4 blocks) loads blocks.0-3
+        """
+        import traceback
+        from opentome.models.utils import load_pt_weights
+        
+        try:
+            from timm.models import create_model
+            
+            # Determine model name
+            if isinstance(pretrained, str):
+                model_name = pretrained
+            else:
+                model_prefix = 'deit' if pretrained_type.lower() == 'deit' else 'vit'
+                if self.embed_dim == 768 and self.num_heads == 12:
+                    model_name = f'{model_prefix}_base_patch16_224'
+                elif self.embed_dim == 384 and self.num_heads == 6:
+                    model_name = f'{model_prefix}_small_patch16_224'
+                elif self.embed_dim == 192 and self.num_heads == 3:
+                    model_name = f'{model_prefix}_tiny_patch16_224'
+                else:
+                    print(f"[HybridToMeModel] Warning: Cannot auto-determine pretrained model for embed_dim={self.embed_dim}, num_heads={self.num_heads}. Specify model name explicitly.")
+                    return
+            
+            load_mode_str = "full" if load_full else "local only"
+            print(f"[HybridToMeModel] Loading {load_mode_str} pretrained weights from timm model: {model_name}")
+            
+            # Create pretrained model and extract weights
+            pretrained_model = create_model(model_name, pretrained=True, img_size=img_size, num_classes=0)
+            pretrained_state = pretrained_model.state_dict()
+            
+            # Load first local_depth blocks to Local Encoder
+            print(f"[HybridToMeModel] Loading blocks [0, {self.local_depth}) to Local Encoder...")
+            load_pt_weights(
+                target_vit=self.local.vit,
+                pretrained_state=pretrained_state,
+                start_block=0,
+                end_block=self.local_depth,
+                verbose=True
+            )
+            
+            # Load remaining blocks to Latent Encoder (if load_full=True and Latent Encoder exists)
+            if load_full and self.latent is not None and self.latent_depth > 0:
+                total_pretrained_depth = self.local_depth + self.latent_depth
+                print(f"[HybridToMeModel] Loading blocks [{self.local_depth}, {total_pretrained_depth}) to Latent Encoder...")
+                load_pt_weights(
+                    target_vit=self.latent.vit,
+                    pretrained_state=pretrained_state,
+                    start_block=self.local_depth,
+                    end_block=total_pretrained_depth,
+                    verbose=True
+                )
+            elif not load_full:
+                print(f"[HybridToMeModel] Skipping Latent Encoder weights (load_full=False)")
+            
+            print(f"[HybridToMeModel] Successfully loaded {load_mode_str} pretrained weights from {model_name}")
+                    
+        except Exception as e:
+            print(f"[HybridToMeModel] ERROR: Failed to load pretrained weights: {e}")
+            print(f"[HybridToMeModel] Exception traceback:")
+            traceback.print_exc()
+            # Don't raise, just warn - allow model to continue without pretrained weights
 
     def _apply_patches(self, dtem_feat_dim, dtem_window_size, dtem_t, total_merge_local, tome_window_size, tome_use_naive_local, total_merge_latent, use_softkmax, swa_size):
         # DTEM patch
@@ -636,32 +721,32 @@ class CLSHybridToMeModel(HybridToMeModel):
 
 
 @register_model
-def hybridtomevit_base(pretrained=False, **kwargs):
+def hybridtomevit_base(**kwargs):
     """HybridToMe ViT Base model"""
     model = HybridToMeModel(arch='base', **kwargs)
     return model
 
 @register_model
-def hybridtomevit_small(pretrained=False, **kwargs):
+def hybridtomevit_small(**kwargs):
     """HybridToMe ViT Small model"""
     model = HybridToMeModel(arch='small', **kwargs)
     return model
 
 # ------ For Image Classification ------ #
 @register_model
-def hybridtomevit_base_cls(pretrained=False, **kwargs):
+def hybridtomevit_base_cls(**kwargs):
     """HybridToMe ViT Base model"""
     model = CLSHybridToMeModel(arch='base', remove_decoder_cross_attention=True, **kwargs)
     return model
 
 @register_model
-def hybridtomevit_small_cls(pretrained=False, **kwargs):
+def hybridtomevit_small_cls(**kwargs):
     """HybridToMe ViT Small model"""
     model = CLSHybridToMeModel(arch='small', remove_decoder_cross_attention=True, **kwargs)
     return model
 
 @register_model
-def hybridtomevit_small_cls_ext(pretrained=False, **kwargs):
+def hybridtomevit_small_cls_ext(**kwargs):
     """HybridToMe ViT Small model"""
     model = CLSHybridToMeModel(arch='s_ext', remove_decoder_cross_attention=True, **kwargs)
     return model

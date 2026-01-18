@@ -45,18 +45,39 @@ def bench_model(model_name: str,
                 num_classes=10,
             ).to(device)
         elif model_name == 'hybrid':
-            from opentome.models.model import HybridToMeModel
+            from opentome.models.mergenet.model import HybridToMeModel
+            # Determine arch based on embed_dim and latent_depth
+            # arch_zoo: small (latent_depth=8), s_ext (latent_depth=12), base (latent_depth=8)
+            if embed_dim == 384:
+                if latent_depth == 12:
+                    arch = 's_ext'  # small_extend
+                elif latent_depth == 8:
+                    arch = 'small'
+                else:
+                    raise ValueError(f"Unsupported latent_depth {latent_depth} for embed_dim=384. Supported: 8 (small), 12 (s_ext)")
+            elif embed_dim == 768:
+                if latent_depth == 8:
+                    arch = 'base'
+                else:
+                    raise ValueError(f"Unsupported latent_depth {latent_depth} for embed_dim=768. Supported: 8 (base)")
+            else:
+                raise ValueError(f"Unsupported embed_dim: {embed_dim}. Supported: 384 (small/s_ext), 768 (base)")
+            
+            # Calculate lambda_local from total_merge_local
+            num_patches = (img_size // patch_size) ** 2
+            if total_merge_local > 0:
+                # lambda_local = num_patches / (num_patches - total_merge_local)
+                lambda_local = num_patches / max(1, num_patches - total_merge_local)
+            else:
+                lambda_local = 2.0  # default
+            
             model = HybridToMeModel(
+                arch=arch,
                 img_size=img_size,
                 patch_size=patch_size,
-                embed_dim=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
                 dtem_feat_dim=64,
-                local_depth=local_depth,
-                latent_depth=latent_depth,
                 tome_use_naive_local=False,
-                total_merge_local=total_merge_local,
+                lambda_local=lambda_local,
                 total_merge_latent=total_merge_latent,
                 dtem_window_size=dtem_window_size,
                 tome_window_size=tome_window_size,

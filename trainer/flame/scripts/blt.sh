@@ -1,6 +1,5 @@
 #!/usr/bin/bash
 
-# ----- Testing ------ #
 export HF_ENDPOINT=https://hf-mirror.com
 export BACKBONE=blt
 export TOKENIZER_NAME=blt
@@ -29,7 +28,7 @@ NNODE=1 NGPU=4 LOG_RANK=0 bash train.sh \
   --training.dataset /ssdwork/yuchang/fineweb-edu/sample/100BT \
   --training.dataset_name default \
   --training.dataset_split train \
-  --training.num_workers 32 \
+  --training.num_workers 32S \
   --training.prefetch_factor 2 \
   --training.seed 42 \
   --training.compile \

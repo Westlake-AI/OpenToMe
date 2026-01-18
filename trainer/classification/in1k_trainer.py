@@ -23,8 +23,6 @@ from collections import OrderedDict
 from contextlib import suppress
 from datetime import datetime
 from typing import Iterable, Optional
-from torchvision.datasets import CIFAR10, CIFAR100
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -43,7 +41,10 @@ from timm.utils import ApexScaler, NativeScaler
 from fvcore.nn import FlopCountAnalysis
 from fvcore.nn import flop_count_table
 
+import opentome.models.deit
+from opentome.models.deit.deit import deit_s, deit_s_extend  # Import to register models
 from opentome.models.mergenet.model import HybridToMeModel
+from opentome.utils.dataset_loader import build_dataset
 
 try:
     from apex import amp
@@ -148,12 +149,26 @@ parser.add_argument("--num_local_blocks", type=int, default=0,
                     help="Number of additional local blocks before DTEM blocks.")
 parser.add_argument("--local_block_window", type=int, default=16,
                     help="Window size for additional local blocks.")
+parser.add_argument("--pretrained_type", type=str, default='vit', choices=['vit', 'deit'],
+                    help='Type of pretrained model for Local Encoder: vit or deit (default: vit)')
+parser.add_argument("--load_full_pretrained", action='store_true', default=False,
+                    help='Load full pretrained weights (Local + Latent encoders). If not set, only load Local Encoder weights.')
+parser.add_argument("--load_only_local", action='store_true', default=False,
+                    help='Only load Local Encoder pretrained weights (equivalent to not using --load_full_pretrained).')
 
 # ToMe parameters
 parser.add_argument("--tome_window_size", type=int, default=None,
                     help="Window size for ToMe (None means global).")
 parser.add_argument("--tome_use_naive_local", action='store_true', default=False,
                     help="Use naive local windowing for ToMe.")
+
+# DeiT parameters
+parser.add_argument("--drop_rate", type=float, default=0.0, metavar='DROP',
+                    help='Dropout rate (default: 0.0)')
+parser.add_argument("--attn_drop_rate", type=float, default=0.0, metavar='ATTN_DROP',
+                    help='Attention dropout rate (default: 0.0)')
+parser.add_argument("--drop_path_rate", type=float, default=0.1, metavar='DROP_PATH',
+                    help='Drop path rate (default: 0.1)')
 
 # Optimizer parameters
 parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
@@ -175,7 +190,9 @@ parser.add_argument('--clip_mode', type=str, default='norm',
 parser.add_argument('--sched', default='cosine', type=str, metavar='SCHEDULER',
                     help='LR scheduler (default: "cosine"')
 parser.add_argument('--lr', type=float, default=1e-3, metavar='LR',
-                    help='learning rate (default: 1e-3)')
+                    help='learning rate (default: 1e-3), used for latent encoder and other modules')
+parser.add_argument('--lr_local', type=float, default=None, metavar='LR',
+                    help='learning rate for local encoder and cross attention (default: None, use --lr)')
 parser.add_argument('--lr_noise', type=float, nargs='+', default=None, metavar='pct, pct',
                     help='learning rate noise on/off epoch percentages')
 parser.add_argument('--lr_noise_pct', type=float, default=0.67, metavar='PERCENT',
@@ -405,7 +422,15 @@ def main():
         'num_classes': args.num_classes,
     }
     
-    # Add custom parameters only for models that support them (e.g., hybridtomevit)
+
+    load_full_pretrained = True  # Model default
+    if 'hybridtome' in args.model.lower() or 'tome' in args.model.lower():
+        if args.load_only_local:
+            load_full_pretrained = False
+        elif args.load_full_pretrained:
+            load_full_pretrained = True
+
+    # HybridToMe models
     if 'hybridtome' in args.model.lower() or 'tome' in args.model.lower():
         model_kwargs.update({
             'img_size': args.img_size,
@@ -422,6 +447,17 @@ def main():
             'tome_window_size': args.tome_window_size,
             'tome_use_naive_local': args.tome_use_naive_local,
             'swa_size': args.swa_size,
+            'pretrained_type': args.pretrained_type,
+            'load_full_pretrained': load_full_pretrained,
+        })
+    # DeiT models
+    elif 'deit' in args.model.lower():
+        model_kwargs.update({
+            'img_size': args.img_size,
+            'patch_size': args.patch_size,
+            'drop_rate': args.drop_rate,
+            'attn_drop_rate': args.attn_drop_rate,
+            'drop_path_rate': args.drop_path_rate,
         })
     
     model = create_model(args.model, **model_kwargs)
@@ -469,7 +505,27 @@ def main():
         assert not args.sync_bn, 'Cannot use SyncBatchNorm with torchscripted model'
         model = torch.jit.script(model)
     
-    optimizer = create_optimizer_v2(model, **optimizer_kwargs(cfg=args))
+    # Create optimizer with different learning rates if specified
+    # Only for HybridToMe models, not for standard models like DeiT
+    lr_local = args.lr_local if args.lr_local is not None else args.lr
+    use_different_lr = (
+        (lr_local != args.lr) and 
+        ('hybridtome' in args.model.lower() or 'tome' in args.model.lower())
+    )
+    
+    if use_different_lr:
+        # Use different learning rates for different encoders
+        from opentome.utils.optimization import create_optimizer_with_encoder_lr
+        optimizer = create_optimizer_with_encoder_lr(
+            model=model,
+            base_lr=args.lr,
+            lr_local=lr_local,
+            optimizer_kwargs_fn=lambda: optimizer_kwargs(cfg=args),
+            local_rank=args.local_rank
+        )
+    else:
+        # Use default optimizer creation
+        optimizer = create_optimizer_v2(model, **optimizer_kwargs(cfg=args))
 
     # setup automatic mixed-precision (AMP) loss scaling and op casting
     amp_autocast = suppress  # do nothing
@@ -523,6 +579,13 @@ def main():
         # NOTE: EMA model does not need to be wrapped by DDP
 
     # setup learning rate schedule and starting epoch
+    # Note: PyTorch schedulers automatically handle multiple parameter groups
+    # They maintain the relative ratios between groups during scheduling
+    if use_different_lr:
+        # Store lr_local for potential future use
+        # The scheduler will automatically maintain the ratio between param groups
+        if args.local_rank == 0:
+            _logger.info(f'Using scheduler with multiple parameter groups (lr={args.lr:.2e}, lr_local={lr_local:.2e})')
     lr_scheduler, num_epochs = create_scheduler(args, optimizer)
     start_epoch = 0
     if args.start_epoch is not None:
@@ -651,94 +714,6 @@ def main():
     if best_metric is not None:
         _logger.info('*** Best metric: {0} (epoch {1})'.format(best_metric, best_epoch))
 
-
-def build_dataset(args, data_config, collate_fn, num_aug_splits):
-    if args.dataset.lower() in ['cifar100', 'cifar10']:
-        if args.dataset.lower() == 'cifar100':
-            DatasetClass = CIFAR100
-            data_config['mean'] = (0.5071, 0.4865, 0.4409)
-            data_config['std'] = (0.2673, 0.2564, 0.2762)
-            assert args.num_classes == 100, "Please check the number of classes."
-        else:
-            DatasetClass = CIFAR10
-            data_config['mean'] = (0.4914, 0.4822, 0.4465)
-            data_config['std'] = (0.2023, 0.1994, 0.2010)
-            assert args.num_classes == 10, "Please check the number of classes."
-
-        # create datasets
-        dataset_train = DatasetClass(root=args.data_dir, train=True, download=args.dataset_download)
-        dataset_eval  = DatasetClass(root=args.data_dir, train=False, download=args.dataset_download)
-
-    elif args.dataset.lower() in ['imagenet', 'imagefolder', '']:
-        dataset_train = create_dataset(
-            args.dataset, root=args.data_dir, split=args.train_split, is_training=True,
-            class_map=args.class_map,
-            download=args.dataset_download,
-            batch_size=args.batch_size,
-            repeats=args.epoch_repeats)
-        dataset_eval = create_dataset(
-            args.dataset, root=args.data_dir, split=args.val_split, is_training=False,
-            class_map=args.class_map,
-            download=args.dataset_download,
-            batch_size=args.batch_size)
-        # wrap dataset in AugMix helper
-        if num_aug_splits > 1:
-            dataset_train = AugMixDataset(dataset_train, num_splits=num_aug_splits)
-    else:
-        raise ValueError(f"Do not support the dataset of {args.dataset.lower()}")
-
-    # create data loaders w/ augmentation pipeiine
-    train_interpolation = args.train_interpolation
-    if args.no_aug or not train_interpolation:
-        train_interpolation = data_config['interpolation']
-    loader_train = create_loader(
-        dataset_train,
-        input_size=data_config['input_size'],
-        batch_size=args.batch_size,
-        is_training=True,
-        use_prefetcher=args.prefetcher,
-        no_aug=args.no_aug,
-        re_prob=args.reprob,
-        re_mode=args.remode,
-        re_count=args.recount,
-        re_split=args.resplit,
-        scale=args.scale,
-        ratio=args.ratio,
-        hflip=args.hflip,
-        vflip=args.vflip,
-        color_jitter=args.color_jitter,
-        auto_augment=args.aa,
-        num_aug_repeats=args.aug_repeats,
-        num_aug_splits=num_aug_splits,
-        interpolation=train_interpolation,
-        mean=data_config['mean'],
-        std=data_config['std'],
-        num_workers=args.workers,
-        distributed=args.distributed,
-        collate_fn=collate_fn,
-        pin_memory=args.pin_mem,
-        use_multi_epochs_loader=args.use_multi_epochs_loader,
-        worker_seeding=args.worker_seeding,
-    )
-
-    loader_eval = create_loader(
-        dataset_eval,
-        input_size=data_config['input_size'],
-        batch_size=args.validation_batch_size or args.batch_size,
-        is_training=False,
-        use_prefetcher=args.prefetcher,
-        interpolation=data_config['interpolation'],
-        mean=data_config['mean'],
-        std=data_config['std'],
-        num_workers=args.workers,
-        distributed=args.distributed,
-        crop_pct=data_config['crop_pct'],
-        pin_memory=args.pin_mem,
-    )
-
-    return loader_train, loader_eval
-
-    
 
 def train_one_epoch(epoch: int,
                     model: nn.Module,

@@ -13,7 +13,6 @@ from transformers.activations import ACT2FN
 from transformers.cache_utils import DynamicCache, EncoderDecoderCache
 from transformers.masking_utils import create_causal_mask
 from transformers.modeling_flash_attention_utils import FlashAttentionKwargs
-from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 # from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
@@ -30,6 +29,11 @@ from .configuration_blt import (
     BltLocalEncoderConfig,
     BltPatcherConfig,
 )
+
+try:
+    from transformers.modeling_layers import GradientCheckpointingLayer
+except ImportError:
+    from fla.models.modeling_layers import GradientCheckpointingLayer
 
 from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
