@@ -35,4 +35,6 @@ CUDA_VISIBLE_DEVICES=4,5 TORCH_DISTRIBUTED_DEBUG=DETAIL torchrun --standalone --
   --amp \
   --output ${OUTPUT_DIR} \
   --experiment ${EXP_NAME} \
-  --seed 42
+  --seed 42 \
+    --pretrained \
+  --pretrained_type deit
