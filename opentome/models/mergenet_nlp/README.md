@@ -94,15 +94,23 @@ model.eval()
 # Prepare prompt
 prompt_ids = torch.tensor([[1, 72, 101, 108, 108, 111]])  # Example: "Hello"
 
-# Generate
+# Generate with efficient sliding window
 generated = model.generate(
     input_ids=prompt_ids,
     max_length=256,
     temperature=0.8,
     top_p=0.9,
     top_k=50,
+    use_sliding_window=True,  # Default: efficient generation
 )
 ```
+
+**Sliding Window Mechanism:**
+- **Key insight**: LoE is just a tokenizer (bytes→latents), only used once at initialization!
+- **Initialization**: Prompt → LoT → LoE (tokenizer) → LaM → O_queue
+- **Per step**: New byte → LoT → H, then H (query) + O_queue (KV) → LocalDecoder → Prediction
+- **Every λ steps**: LaM autoregressively generates next latent word, O_queue slides (FIFO)
+- **Complexity**: O(L·d² + N·d²/λ) per step vs O(L²·d²) full recompute (~4x faster when λ=4)
 
 ## Model Sizes
 
@@ -113,6 +121,41 @@ generated = model.generate(
 | Large | 1024 | 6+6+12 | ~500M | High capacity |
 
 ## Implementation Details
+
+### Generation Algorithm Details
+
+The sliding window generation leverages the hierarchical nature of MergeNet:
+
+**Stage 1: Initialization (once)**
+```
+input_bytes → LoT → H_buffer
+H_buffer → LoE (differentiable tokenizer) → Z_merged
+Z_merged → LaM (GPT) → O_queue (N latent words)
+```
+
+**Stage 2: Byte-by-byte generation loop**
+```
+For each new byte:
+  1. Update byte_buffer (sliding window, size L)
+  2. LoT(byte_buffer) → H_buffer
+  3. H_last + O_queue → LocalDecoder → next_byte_logits
+  4. Sample next byte
+  
+  Every λ bytes:
+    5. LaM(O_queue) → O_new  (autoregressive generation)
+    6. O_queue = O_queue[1:] + O_new[-1:]  (sliding window)
+```
+
+**Why this works:**
+- LoE acts as a learned tokenizer: bytes → latent words (differentiable compression)
+- Once initialized, we don't need to re-tokenize; LaM generates new latent words directly
+- LaM is a pure GPT decoder: given N latent words, it predicts the (N+1)-th latent word
+- LocalDecoder bridges latent words (semantic) to bytes (surface form)
+
+**Complexity benefits:**
+- Without sliding window: O(L² · d²) per byte
+- With sliding window: O((L + N) · d²) ≈ O(L · d²) per byte (since N = L/λ << L)
+- Speedup factor: ~λ (4x when λ=4)
 
 ### Source Matrix Tracking
 - Shape: (B, N, width) where width = 2 × window_size × local_depth + 1
@@ -190,19 +233,16 @@ For byte position t attending to latent position j:
 
 ## Known Limitations
 
-1. **Generation Speed**: Current implementation regenerates from full context
-   - TODO: Implement efficient sliding window queue for inference
-   
-2. **Memory**: Source matrix tracking adds ~L × width overhead
+1. **Memory**: Source matrix tracking adds ~L × width overhead
    - Mitigated by sparse band structure
    
-3. **Context Length**: Limited by max_position_embeddings (2048 default)
+2. **Context Length**: Limited by max_position_embeddings (2048 default)
    - Can be extended with proper position encoding
 
 ## Future Work
 
-- [ ] Optimize generation with proper sliding window queue
-- [ ] Support for KV caching
+- [x] Optimize generation with proper sliding window queue ✅ (Implemented)
+- [ ] Support for KV caching in LoT for further speedup
 - [ ] Flash Attention integration in all modules
 - [ ] Multi-GPU training recipes
 - [ ] Pretrained checkpoints

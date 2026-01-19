@@ -13,6 +13,7 @@ from transformers.utils import logging
 
 from fla.layers.attn import Attention
 from fla.modules import GatedMLP as TransformerMLP
+from fla.models.utils import Cache
 
 # Use fla's fused RMSNorm if CUDA is available (faster), otherwise fallback to PyTorch native
 try:
@@ -215,29 +216,49 @@ class SharedLocalTransformer(nn.Module):
         
         self.gradient_checkpointing = False
 
-    def forward(self, input_ids, attention_mask=None):
+    def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, output_attentions=False):
         """
         Args:
             input_ids: (B, L) - byte token ids
             attention_mask: (B, L) - optional attention mask
+            past_key_values: Optional[Cache] - cached key/value states
+            use_cache: bool - whether to return key/value states for caching
+            output_attentions: bool - whether to return attention weights
         Returns:
             hidden_states: (B, L, d) - local context representations
+            next_cache: Optional[Cache] - updated cache (if use_cache=True)
         """
+        # Convert legacy cache format if needed
+        if use_cache and not isinstance(past_key_values, Cache):
+            past_key_values = Cache.from_legacy_cache(past_key_values)
+        
         # Embedding
         hidden_states = self.embeddings(input_ids)
+        
+        next_cache = None
         
         # Forward through transformer blocks
         for layer in self.layers:
             layer_outputs = layer(
                 hidden_states,
                 attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
             )
             hidden_states = layer_outputs[0]
+            
+            if use_cache:
+                # Cache is at index 2 if output_attentions, else index 1
+                next_cache = layer_outputs[2 if output_attentions else 1]
         
         # Final norm
         hidden_states = self.norm(hidden_states)
         
-        return hidden_states
+        if use_cache:
+            return hidden_states, next_cache
+        else:
+            return hidden_states
 
 
 # =====================================================================
@@ -392,29 +413,49 @@ class LatentModel(nn.Module):
 
         self.gradient_checkpointing = False
 
-    def forward(self, latent_words, size=None, attention_mask=None):
+    def forward(self, latent_words, size=None, attention_mask=None, past_key_values=None, use_cache=False, output_attentions=False):
         """
         Args:
             latent_words: (B, N, d) - compressed tokens from LoE
             size: (B, N, 1) - optional token sizes (unused, kept for interface compatibility)
             attention_mask: (B, N) - optional attention mask
+            past_key_values: Optional[Cache] - cached key/value states
+            use_cache: bool - whether to return key/value states for caching
+            output_attentions: bool - whether to return attention weights
         Returns:
             outputs: (B, N, d) - predicted latent representations
+            next_cache: Optional[Cache] - updated cache (if use_cache=True)
         """
+        # Convert legacy cache format if needed
+        if use_cache and not isinstance(past_key_values, Cache):
+            past_key_values = Cache.from_legacy_cache(past_key_values)
+        
         hidden_states = latent_words
+        
+        next_cache = None
         
         # Forward through transformer blocks
         for layer in self.layers:
             layer_outputs = layer(
                 hidden_states,
                 attention_mask=attention_mask,
+                past_key_values=past_key_values,
+                use_cache=use_cache,
+                output_attentions=output_attentions,
             )
             hidden_states = layer_outputs[0]
+            
+            if use_cache:
+                # Cache is at index 2 if output_attentions, else index 1
+                next_cache = layer_outputs[2 if output_attentions else 1]
         
         # Final norm
         hidden_states = self.norm(hidden_states)
         
-        return hidden_states
+        if use_cache:
+            return hidden_states, next_cache
+        else:
+            return hidden_states
 
 
 # =====================================================================
@@ -444,11 +485,13 @@ class LocalDecoder(nn.Module):
         self.W_infer = config.W_infer
         self.gamma = config.grid_bias_gamma
 
-    def forward(self, query_states, latent_words):
+    def forward(self, query_states, latent_words, byte_positions=None, latent_positions=None):
         """
         Args:
             query_states: (B, L, d) - original H from LoT
             latent_words: (B, N, d) - O from LaM
+            byte_positions: (L,) or None - absolute positions of bytes (for generation)
+            latent_positions: (N,) or None - absolute positions of latent words (for generation)
         Returns:
             decoded_states: (B, L, d) - byte-level representations
         """
@@ -456,30 +499,35 @@ class LocalDecoder(nn.Module):
         N = latent_words.shape[1]
         device = query_states.device
         
+        # Use provided positions or default to relative positions
+        if byte_positions is None:
+            t_indices = torch.arange(L, device=device, dtype=query_states.dtype).view(1, L, 1)
+        else:
+            t_indices = byte_positions.to(dtype=query_states.dtype).view(1, L, 1)
+        
+        if latent_positions is None:
+            j_indices = torch.arange(N, device=device, dtype=query_states.dtype).view(1, 1, N)
+        else:
+            j_indices = latent_positions.to(dtype=query_states.dtype).view(1, 1, N)
+        
         # Construct Band Mask + Grid Bias
         # Grid Bias: -gamma * |t/lambda - j|
-        t_indices = torch.arange(L, device=device, dtype=query_states.dtype).view(1, L, 1)
-        j_indices = torch.arange(N, device=device, dtype=query_states.dtype).view(1, 1, N)
-        
         grid_bias = -self.gamma * torch.abs(t_indices / self.lambda_local - j_indices)
         
         # Band Mask: Causal + Window constraint
         # For each byte position t, it can only attend to latent words in range:
         # j_center = floor(t / lambda), valid range: [j_center - W_infer, j_center]
-        band_mask = torch.full((B, L, N), float('-inf'), device=device, dtype=query_states.dtype)
+        # band_mask = torch.full((B, L, N), float('-inf'), device=device, dtype=query_states.dtype)
         
-        # loop, see if can be optimized in the future.
-        for t in range(L):
-            j_center = int(t / self.lambda_local)
-            # Causal: can only see up to current position (j <= j_center)
-            # Window: can only see within W_infer window
-            j_start = max(0, j_center - self.W_infer)
-            j_end = min(N, j_center + 1)  # +1 because range is exclusive
-            band_mask[:, t, j_start:j_end] = 0.0
-        
+        # Loop over bytes to compute band mask
+        # Vectorized band mask computation (no loops!)
+        cond_causal = j_indices <= (t_indices / self.lambda_local)
+        cond_window = j_indices >= (t_indices / self.lambda_local - self.W_infer)
+        mask_val = torch.where(cond_causal & cond_window, 0.0, float('-inf'))
         # Combine grid bias and band mask
-        combined_mask = grid_bias + band_mask
-        
+        combined_mask = grid_bias + mask_val
+        combined_mask = combined_mask.to(torch.bfloat16)
+        import pdb;pdb.set_trace()
         # Cross-attention: Q from bytes, KV from latent words
         decoded_states = self.cross_attention(query_states, latent_words, mask=combined_mask)
         
@@ -818,6 +866,7 @@ class MergeNetForCausalLM(MergeNetPreTrainedModel):
         temperature: float = 1.0,
         top_p: float = 0.9,
         top_k: int = 50,
+        use_sliding_window: bool = True,
         **kwargs,
     ):
         """
@@ -829,18 +878,34 @@ class MergeNetForCausalLM(MergeNetPreTrainedModel):
             temperature: sampling temperature
             top_p: nucleus sampling threshold
             top_k: top-k sampling threshold
+            use_sliding_window: whether to use efficient sliding window (True) or full recompute (False)
         Returns:
             generated_ids: (B, max_length)
         """
+        if use_sliding_window:
+            return self._generate_with_sliding_window(
+                input_ids, max_length, temperature, top_p, top_k, **kwargs
+            )
+        else:
+            return self._generate_full_recompute(
+                input_ids, max_length, temperature, top_p, top_k, **kwargs
+            )
+    
+    def _generate_full_recompute(
+        self,
+        input_ids: torch.LongTensor,
+        max_length: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        **kwargs,
+    ):
+        """Fallback generation: recompute everything each step (simpler but slower)."""
         B, L_prompt = input_ids.shape
         device = input_ids.device
         
         # Initialize generation
         generated = input_ids.clone()
-        
-        # Sliding window queue state
-        latent_queue = None  # Will be initialized after first forward pass
-        ptr = L_prompt  # Byte pointer (continuous)
         
         for step in range(max_length - L_prompt):
             # Forward pass through full model
@@ -850,45 +915,8 @@ class MergeNetForCausalLM(MergeNetPreTrainedModel):
             # Get logits for last position
             logits = self.lm_head(hidden_states[:, -1, :])  # (B, vocab_size)
             
-            # Apply temperature
-            if temperature != 1.0:
-                logits = logits / temperature
-            
-            # Top-k filtering
-            if top_k > 0:
-                indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
-                logits[indices_to_remove] = float('-inf')
-            
-            # Top-p (nucleus) filtering
-            if top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-                cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
-                
-                # Remove tokens with cumulative probability above threshold
-                sorted_indices_to_remove = cumulative_probs > top_p
-                # Keep at least one token
-                sorted_indices_to_remove[..., 0] = False
-                
-                indices_to_remove = sorted_indices_to_remove.scatter(
-                    1, sorted_indices, sorted_indices_to_remove
-                )
-                logits[indices_to_remove] = float('-inf')
-            
             # Sample next token
-            # For safety with untrained models, check for nan/inf
-            if torch.isnan(logits).any() or torch.isinf(logits).any():
-                # Use greedy decoding as fallback
-                next_token = torch.argmax(logits, dim=-1, keepdim=True)  # (B, 1)
-            else:
-                probs = torch.softmax(logits, dim=-1)
-                # Additional safety: clamp probs to avoid numerical issues
-                probs = torch.clamp(probs, min=1e-8, max=1.0)
-                probs = probs / probs.sum(dim=-1, keepdim=True)  # Renormalize
-                try:
-                    next_token = torch.multinomial(probs, num_samples=1)  # (B, 1)
-                except RuntimeError:
-                    # Fallback to greedy if multinomial fails
-                    next_token = torch.argmax(logits, dim=-1, keepdim=True)  # (B, 1)
+            next_token = self._sample_next_token(logits, temperature, top_p, top_k)
             
             # Append to generated sequence
             generated = torch.cat([generated, next_token], dim=1)
@@ -896,14 +924,252 @@ class MergeNetForCausalLM(MergeNetPreTrainedModel):
             # Check for EOS
             if (next_token == self.config.eos_token_id).all():
                 break
-            
-            # Update pointer
-            ptr += 1.0 / self.config.lambda_local
-            
-            # TODO: Implement proper sliding window queue mechanism
-            # For now, we regenerate from full context (simpler but less efficient)
         
         return generated
+    
+    def _generate_with_sliding_window(
+        self,
+        input_ids: torch.LongTensor,
+        max_length: int,
+        temperature: float,
+        top_p: float,
+        top_k: int,
+        **kwargs,
+    ):
+        """
+        Efficient generation using sliding window queue.
+        
+        Key insight: LoE is just a tokenizer (bytes -> latent words), only used once!
+        After initialization, LaM autoregressively generates new latent words.
+        
+        Architecture flow:
+        1. [Init once] Prompt -> LoT -> LoE -> LaM -> O_queue
+        2. [Every step] New byte -> LoT -> H, then H (Q) + O_queue (KV) -> LocalDecoder -> prediction
+        3. [Every λ steps] LaM autoregressively generates next latent word, update O_queue (sliding window)
+        
+        Complexity per step:
+        - LoT: O(L * d^2) where L=window_size (local attention)
+        - LocalDecoder: O(1 * N * d^2) where N=L/λ (cross-attention, query length=1)
+        - LaM (every λ steps): O(N * d^2) amortized to O(N * d^2 / λ) per step
+        Total: O(L * d^2 + N * d^2) ≈ O(L * d^2) per step
+        """
+        B, L_prompt = input_ids.shape
+        device = input_ids.device
+        
+        lambda_local = self.config.lambda_local
+        # Latent queue size: W_infer + 1 (for sufficient context in LocalDecoder)
+        N_queue = self.config.W_infer + 1
+        
+        # === Initialization: Process FULL prompt (no truncation) ===
+        # Step 1: LoT with KV cache - get byte-level representations for entire prompt
+        # Since LoT uses global causal attention, we need to maintain full history
+        # Use KV cache to avoid O(T²) recomputation
+        H_full, past_key_values_lot = self.model.shared_local_transformer(
+            input_ids, attention_mask=None, past_key_values=None, use_cache=True
+        )  # (B, L_prompt, d)
+        
+        # Step 2: LoE - soft token merging with DTEM
+        Z_merged, size_merged, source_matrix, info_local = self.model.local_encoder(H_full, phase=self.config.phase)
+        # Z_merged: (B, N_merged, d), N_merged ≈ L - total_merge
+        
+        # Step 3: TopK Selection + Perceiver Cross-Attention
+        Z_full, size_full = self.model._select_and_refine_tokens(
+            Z_merged, size_merged, source_matrix, H_full, info_local
+        )
+        # Z_full: (B, M, d), M = L_prompt / λ (target latent count)
+        
+        # Step 4: Build LaM cache up to M-1 tokens (leave last for autoregressive generation)
+        # IMPORTANT: O_queue should contain Z (LoE output), not O (LaM output)!
+        # Because O[i] is used to decode bytes of latent word i, and we need Z as starting point
+        M_total = Z_full.shape[1]
+        
+        # Build LaM cache with first M-1 tokens
+        if M_total > 1:
+            Z_init = Z_full[:, :-1, :]  # First M-1 tokens for cache
+            _, past_key_values_lam = self.model.latent_model(
+                Z_init, size=None, attention_mask=None, past_key_values=None, use_cache=True
+            )  # Build cache, discard output (we'll use Z for queue)
+        else:
+            past_key_values_lam = None
+        
+        # === Extract sliding window for latent queue ===
+        # CRITICAL: Initialize O_queue with Z, not O!
+        # Z represents the "input" latent words, O will be generated autoregressively
+        if M_total >= N_queue:
+            O_queue = Z_full[:, -N_queue:, :].clone()  # (B, N_queue, d) - use Z!
+        else:
+            # Pad if needed
+            pad_len = N_queue - M_total
+            O_queue = torch.cat([
+                torch.zeros(B, pad_len, Z_full.shape[2], device=device, dtype=Z_full.dtype),
+                Z_full
+            ], dim=1)  # (B, N_queue, d)
+        
+        # Prepare input for first LaM autoregressive generation
+        # Feed the last Z to generate first O
+        next_latent_input = Z_full[:, -1:, :].clone() if M_total > 0 else None
+        
+        # === Maintain FULL byte sequence (no truncation) ===
+        # LoT uses global causal attention with KV cache
+        # byte_sequence: accumulates all generated bytes
+        byte_sequence = input_ids.clone()  # (B, L_prompt)
+        
+        # Track latent pointer (continuous, supports non-integer lambda)
+        # Pointer increases by 1/λ for each byte generated
+        # When floor(ptr) changes, we cross a latent word boundary
+        ptr = L_prompt / lambda_local  # Initial pointer position
+        prev_latent_idx = int(ptr)
+        
+        # Track the input for next LaM autoregressive generation
+        # First time: use Z_last (held out from init)
+        # Subsequent times: use the output from previous generation
+        
+        # Track latent positions in O_queue for proper band mask calculation
+        # Note: O_queue contains Z (not O), with M_total latent words
+        if M_total >= N_queue:
+            # O_queue = Z_full[-N_queue:]
+            start_latent_idx = M_total - N_queue
+            latent_positions = torch.arange(start_latent_idx, M_total, device=device)
+        else:
+            # O_queue = [padding, Z_full]
+            pad_len = N_queue - M_total
+            latent_positions = torch.cat([
+                torch.full((pad_len,), -1000, device=device, dtype=torch.long),  # padding
+                torch.arange(M_total, device=device)  # actual latents [0, ..., M_total-1]
+            ], dim=0)
+        
+        # Initialize generation state
+        current_pos = L_prompt  # Current byte position
+        import pdb;pdb.set_trace()
+        for step in range(max_length - L_prompt):
+            # === Decoding: Use LAST byte's H as query, O_queue as KV ===
+            # Get H for the most recent byte
+            if step == 0:
+                # First step: Use the last hidden state from init (already in cache)
+                # Don't re-process the last byte!
+                H_current = H_full[:, -1:, :]  # (B, 1, d)
+            else:
+                # Subsequent steps: Process the newly generated byte with cache
+                last_byte = byte_sequence[:, -1:].clone()  # (B, 1)
+                H_current, past_key_values_lot = self.model.shared_local_transformer(
+                    last_byte, 
+                    attention_mask=None, 
+                    past_key_values=past_key_values_lot, 
+                    use_cache=True
+                )  # (B, 1, d)
+            
+            # LocalDecoder: Cross-attention Q=H_current, KV=O_queue
+            # Pass positions for correct band mask calculation
+            byte_pos = torch.tensor([current_pos - 1], device=device)  # -1 because current_pos is next position
+            H_decoded = self.model.local_decoder(
+                H_current, 
+                O_queue,
+                byte_positions=byte_pos,
+                latent_positions=latent_positions
+            )  # (B, 1, d)
+            
+            # Predict next byte
+            logits = self.lm_head(H_decoded[:, 0, :])  # (B, vocab_size)
+            
+            # Sample next token
+            next_token = self._sample_next_token(logits, temperature, top_p, top_k)
+            
+            # Check for EOS
+            if (next_token == self.config.eos_token_id).all():
+                break
+            
+            # === Update state for next iteration ===
+            # Append new byte to full sequence (for position tracking)
+            byte_sequence = torch.cat([byte_sequence, next_token], dim=1)  # (B, L_current+1)
+            
+            # Update current byte position
+            current_pos += 1
+            
+            # Note: LoT's KV cache (past_key_values_lot) is automatically updated
+            # No need to recompute H for full sequence - O(T) per step instead of O(T²)
+            
+            # === Update latent queue when crossing latent word boundary ===
+            # Advance pointer by 1/λ for each byte
+            ptr += 1.0 / lambda_local
+            current_latent_idx = int(ptr)  # Floor division
+            
+            # Check if we've crossed into a new latent word
+            if current_latent_idx > prev_latent_idx:
+                # LaM autoregressively generates next O (latent representation)
+                # Workflow: Z[0]...Z[i] or O[0]...O[i] → LaM → O[i+1]
+                # Then O[i+1] is used to decode bytes of latent word i+1
+                
+                # Feed the input (first time: Z_last; later: previous O) into LaM
+                O_new, past_key_values_lam = self.model.latent_model(
+                    next_latent_input,  # First time: Z[-1]; Later: previous O_new
+                    size=None,
+                    attention_mask=None,
+                    past_key_values=past_key_values_lam,
+                    use_cache=True
+                )  # (B, 1, d)
+                
+                # Sliding window: remove oldest element (Z or O), append new O
+                # Gradually O_queue transitions from all Z to all O
+                O_queue = torch.cat([O_queue[:, 1:, :], O_new], dim=1)  # (B, N_queue, d)
+                
+                # Update latent positions: slide window
+                latent_positions = torch.cat([
+                    latent_positions[1:], 
+                    torch.tensor([current_latent_idx-1], device=device)
+                ], dim=0)
+                
+                # Prepare input for next autoregressive generation
+                # Standard GPT: use previous output as next input
+                next_latent_input = O_new
+                
+                # Update tracking
+                prev_latent_idx = current_latent_idx
+        
+        return byte_sequence
+    
+    def _sample_next_token(self, logits, temperature, top_p, top_k):
+        """Sample next token from logits with temperature, top-p, top-k filtering."""
+        # Apply temperature
+        if temperature != 1.0:
+            logits = logits / temperature
+        
+        # Top-k filtering
+        if top_k > 0:
+            indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+            logits[indices_to_remove] = float('-inf')
+        
+        # Top-p (nucleus) filtering
+        if top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+            
+            # Remove tokens with cumulative probability above threshold
+            sorted_indices_to_remove = cumulative_probs > top_p
+            # Keep at least one token
+            sorted_indices_to_remove[..., 0] = False
+            
+            indices_to_remove = sorted_indices_to_remove.scatter(
+                1, sorted_indices, sorted_indices_to_remove
+            )
+            logits[indices_to_remove] = float('-inf')
+        
+        # Sample next token
+        # For safety with untrained models, check for nan/inf
+        if torch.isnan(logits).any() or torch.isinf(logits).any():
+            # Use greedy decoding as fallback
+            next_token = torch.argmax(logits, dim=-1, keepdim=True)  # (B, 1)
+        else:
+            probs = torch.softmax(logits, dim=-1)
+            # Additional safety: clamp probs to avoid numerical issues
+            probs = torch.clamp(probs, min=1e-8, max=1.0)
+            probs = probs / probs.sum(dim=-1, keepdim=True)  # Renormalize
+            try:
+                next_token = torch.multinomial(probs, num_samples=1)  # (B, 1)
+            except RuntimeError:
+                # Fallback to greedy if multinomial fails
+                next_token = torch.argmax(logits, dim=-1, keepdim=True)  # (B, 1)
+        
+        return next_token
 
     def prepare_inputs_for_generation(self, input_ids, **kwargs):
         return {"input_ids": input_ids}

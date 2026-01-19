@@ -537,7 +537,7 @@ class DTEMBlock(Block):
                 # NOTE: a_orig_idx and b_orig_idx may have been aligned in _select if Na != Nb
                 # So their shape[1] may be min(Na, Nb), not the original Na/Nb
                 # a_orig_idx: (B, Na_aligned) -> (B, Na_aligned, 1)
-                # b_indices: (1, Na, 2*window_size+1)  
+                # b_indices: (1, Na, 2*window_size+1)
                 # b_orig_idx: (B, Nb_aligned)
                 
                 # Use actual shapes from orig_idx tensors
@@ -557,7 +557,7 @@ class DTEMBlock(Block):
                     
                     # Ensure indices are within bounds
                     b_indices_expanded = b_indices_expanded.clamp(0, Nb_aligned - 1)
-                    
+                
                     # Gather b's original positions at window indices
                     b_orig_expanded = b_orig_idx.unsqueeze(1).expand(-1, Na_aligned, -1)  # (B, Na_aligned, Nb_aligned)
                     b_orig_at_window = torch.gather(
@@ -565,11 +565,11 @@ class DTEMBlock(Block):
                         dim=2,
                         index=b_indices_expanded  # (B, Na_aligned, 2*window_size+1)
                     )  # (B, Na_aligned, 2*w+1)
-                    
+                
                     # Check physical distance
                     physical_distance = torch.abs(a_orig_expanded - b_orig_at_window)  # (B, Na_aligned, 2*w+1)
                     physical_local_mask = physical_distance <= window_size  # (B, Na_aligned, 2*w+1)
-                    
+                
                     # Combine with valid_mask
                     physical_mask = valid_mask & physical_local_mask  # (B, Na, 2*w+1)
             
@@ -683,11 +683,12 @@ class DTEMBlock(Block):
                 source_b_flat.scatter_add_(0, linear_idx.reshape(-1), transferred_masked.reshape(-1))
                 source_b_new = source_b_flat.reshape(B_cur, Nb_cur, width)
                 
-                # OPTIMIZED: Reuse 'transferred' instead of recalculating
-                # Original: total_transferred = (assign.unsqueeze(-1) * source_a.unsqueeze(2)).sum(dim=2)
-                # Optimized: sum the already-computed 'transferred' tensor (54% faster)
-                total_transferred = transferred.sum(dim=2)  # (B, Na, width)
-                source_a_new = source_a - total_transferred
+                # Update source_a with SAME logic as wa update
+                # wa uses: wa * (tmp + (clamp(tmp, 0, 1) - tmp).detach())
+                # source_a should use the SAME scaling factor
+                # Note: source_a.sum(dim=-1) should equal wa after this operation
+                tmp_source = tmp.unsqueeze(-1)  # (B, Na, 1) - broadcast over width dimension
+                source_a_new = source_a * (tmp_source + (torch.clamp(tmp_source, min=0., max=1.) - tmp_source).detach())
             else:
                 # Global case: similar logic but with full assign matrix
                 # For simplicity, keep source unchanged in global mode for now
@@ -876,10 +877,10 @@ def dtem_apply_patch(
         "class_token": getattr(model, 'cls_token', None) is not None,
         "distill_token": getattr(model, 'dist_token', None) is not None,
         "source_tracking_mode": source_tracking_mode,
-            "k2": None,
-            "tau1": 1.0,
+        "k2": None,
+        "tau1": 1.0,
             "tau2": 30.0,  # Temperature for softmax/ThreTopK (higher = smoother)
-            "feat_dim": feat_dim,
+        "feat_dim": feat_dim,
         "window_size": window_size,
         "t": t,
         "use_softkmax": use_softkmax,

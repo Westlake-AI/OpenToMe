@@ -24,7 +24,7 @@ def create_model_example():
         intermediate_size=1536,
         max_position_embeddings=2048,
         lambda_local=4.0,
-        dtem_window_size=16,
+        dtem_window_size=4,
         dtem_t=1,
         use_softkmax=False,
         phase="phase2",  # Prediction mode
@@ -51,7 +51,7 @@ def training_example():
     
     # Create dummy input (batch_size=2, seq_len=128)
     batch_size = 2
-    seq_len = 128
+    seq_len = 20
     input_ids = torch.randint(0, config.vocab_size, (batch_size, seq_len), device=device)
     labels = torch.randint(0, config.vocab_size, (batch_size, seq_len), device=device)
     
@@ -158,7 +158,7 @@ def model_architecture_summary():
 if __name__ == "__main__":
     # Run examples
     model_architecture_summary()
-    training_example()
+    # training_example()
     generation_example()
     
     print("=" * 60)
