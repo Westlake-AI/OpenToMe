@@ -497,3 +497,120 @@ else:
     class Cache(LegacyFLACache):
         def __init__(self, seen_tokens: int = 0, **kwargs: Any) -> None:
             super().__init__(seen_tokens=seen_tokens)
+
+
+def load_pt_weights(
+    target_vit,
+    pretrained_state: dict,
+    start_block: int = 0,
+    end_block: int = None,
+    verbose: bool = True
+) -> tuple[int, int, list, list]:
+    """
+    Load pretrained weights from a state dict into a VisionTransformer model.
+    Supports loading a range of blocks with optional offset mapping.
+    
+    Args:
+        target_vit: The target VisionTransformer model to load weights into
+        pretrained_state: State dict from pretrained model
+        start_block: Starting block index in pretrained model (inclusive). Default: 0
+        end_block: Ending block index in pretrained model (exclusive). If None, loads all blocks up to target depth.
+        verbose: Whether to print detailed statistics
+    
+    Returns:
+        tuple: (loaded_count, loaded_params, missing_keys, unexpected_keys)
+            - loaded_count: Number of keys successfully loaded
+            - loaded_params: Total number of parameters loaded
+            - missing_keys: List of missing keys
+            - unexpected_keys: List of unexpected keys
+    
+    Examples:
+        # Load first 4 blocks (Local Encoder): blocks.0 to blocks.3
+        load_pt_weights(target_vit, pretrained_state, start_block=0, end_block=4)
+        
+        # Load blocks 4-12 with offset mapping (Latent Encoder): pretrained blocks.4-11 -> target blocks.0-7
+        load_pt_weights(target_vit, pretrained_state, start_block=4, end_block=12)
+    """
+    current_state = target_vit.state_dict()
+    
+    # Statistics
+    loaded_count = 0
+    loaded_params = 0
+    skipped_head = 0
+    skipped_range = 0
+    skipped_shape = 0
+    skipped_missing = 0
+    total_pretrained_keys = len(pretrained_state)
+    total_current_keys = len(current_state)
+    
+    # Determine if we need offset mapping (start_block > 0)
+    use_offset = start_block > 0
+    
+    # Filter compatible weights
+    for key, value in pretrained_state.items():
+        # Skip head/classifier and extra layers
+        if 'head' in key or 'classifier' in key:
+            skipped_head += 1
+            continue
+        
+        # Handle blocks
+        if 'blocks.' in key:
+            try:
+                pretrained_block_idx = int(key.split('.')[1])
+                
+                # Check if this block is in the target range
+                if end_block is not None and pretrained_block_idx >= end_block:
+                    skipped_range += 1
+                    continue
+                if pretrained_block_idx < start_block:
+                    skipped_range += 1
+                    continue
+                
+                # Map block index if using offset
+                if use_offset:
+                    target_block_idx = pretrained_block_idx - start_block
+                    # Replace block index in key
+                    key_parts = key.split('.')
+                    key_parts[1] = str(target_block_idx)
+                    mapped_key = '.'.join(key_parts)
+                else:
+                    mapped_key = key
+            except (ValueError, IndexError):
+                mapped_key = key
+        else:
+            # For non-block keys (patch_embed, norm_pre, etc.)
+            if use_offset:
+                # Skip these for LatentEncoder (which uses offset mapping)
+                if 'patch_embed' in key or 'pos_embed' in key or 'cls_token' in key or 'norm_pre' in key:
+                    skipped_range += 1
+                    continue
+            mapped_key = key
+        
+        # Load if compatible
+        if mapped_key in current_state:
+            if current_state[mapped_key].shape == value.shape:
+                current_state[mapped_key] = value
+                loaded_count += 1
+                loaded_params += value.numel()
+            else:
+                skipped_shape += 1
+        else:
+            skipped_missing += 1
+    
+    # Load the filtered state dict
+    missing_keys, unexpected_keys = target_vit.load_state_dict(current_state, strict=False)
+    
+    if verbose:
+        if use_offset:
+            print(f"[load_pt_weights] Successfully loaded {loaded_count} keys ({loaded_params:,} parameters)")
+            print(f"[load_pt_weights] Block range: pretrained blocks [{start_block}, {end_block}) -> target blocks [0, {end_block-start_block})")
+        else:
+            print(f"[load_pt_weights] Successfully loaded {loaded_count} keys ({loaded_params:,} parameters)")
+            print(f"[load_pt_weights] Block range: pretrained blocks [0, {end_block})")
+        print(f"[load_pt_weights] Statistics: total_pretrained_keys={total_pretrained_keys}, total_current_keys={total_current_keys}")
+        print(f"[load_pt_weights] Skipped: head/classifier={skipped_head}, out_of_range={skipped_range}, "
+              f"shape_mismatch={skipped_shape}, missing_in_current={skipped_missing}")
+        if missing_keys:
+            print(f"[load_pt_weights] Missing keys (first 10): {missing_keys[:10]}")
+        if unexpected_keys:
+            print(f"[load_pt_weights] Unexpected keys (first 10): {unexpected_keys[:10]}")

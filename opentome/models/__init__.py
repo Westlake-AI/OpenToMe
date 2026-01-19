@@ -7,6 +7,10 @@ from opentome.models.transformer import TransformerConfig, TransformerForCausalL
 from opentome.models.mergenet_nlp import MergeNetConfig, MergeNetForCausalLM, MergeNetModel
 # from opentome.models.qwen3_next import Qwen3NextConfig, Qwen3NextForCausalLM, Qwen3NextModel
 
+# --- Classification Models ---
+from opentome.models.deit.deit import DeiTModel, deit_s, deit_s_extend
+from opentome.models.mergenet.model import HybridToMeModel
+
 __all__ = [
     'BltConfig', 'BltModel', 'BltForCausalLM',
     'DeltaNetConfig', 'DeltaNetForCausalLM', 'DeltaNetModel',
@@ -15,4 +19,8 @@ __all__ = [
     'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
     'MergeNetConfig', 'MergeNetForCausalLM', 'MergeNetModel',
     # 'Qwen3NextConfig', 'Qwen3NextForCausalLM', 'Qwen3NextModel'
+    # 'Qwen3NextConfig', 'Qwen3NextForCausalLM', 'Qwen3NextModel',
+
+    'DeiTModel', 'deit_s', 'deit_s_extend',
+    'HybridToMeModel',
 ]

@@ -3,40 +3,29 @@
 # --dtem_window_size None \
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-export HF_ENDPOINT=https://hf-mirror.com
 
 DATA_DIR=/liziqing/lisiyuan/jx/.cache/cifar100
 OUTPUT_DIR=./work_dirs/classification
-EXP_NAME=cifar100_mergenet_small_swa256_detem32_lr5e4_lr_local_5e4_load_pt_deit_s_full
+EXP_NAME=cifar100_deit_s_extend_lr5e4
 
 
-CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node 2 "${SCRIPT_DIR}/in1k_trainer.py" \
+CUDA_VISIBLE_DEVICES=4,5 TORCH_DISTRIBUTED_DEBUG=DETAIL torchrun --standalone --nproc_per_node 2 "${SCRIPT_DIR}/in1k_trainer.py" \
   --data_dir ${DATA_DIR} \
   --dataset CIFAR100 \
   --train_split train \
   --val_split val \
-  --model hybridtomevit_small_cls \
+  --model deit_s_extend \
   --num_classes 100 \
   --img_size 224 \
-  --patch_size 8 \
-  --dtem_r 4 \
-  --dtem_t 2 \
-  --dtem_feat_dim 64 \
-  --lambda_local 4.0 \
-  --total_merge_latent 0 \
-  --num_local_blocks 1 \
-  --use_softkmax \
-  --swa_size 256 \
+  --patch_size 16 \
   --batch_size 50 \
   --epochs 200 \
   --lr 5e-4 \
-  --lr_local 5e-4 \
   --weight_decay 0.05 \
-  --dtem_window_size 32 \
+  --drop_rate 0.0 \
+  --attn_drop_rate 0.0 \
+  --drop_path_rate 0.1 \
   --sched cosine \
-  --pretrained \
-  --load_full_pretrained \
-  --pretrained_type deit \
   --warmup_epochs 20 \
   --mixup 0.8 \
   --cutmix 1.0 \
@@ -47,3 +36,5 @@ CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node 2 "${SCRIPT_DIR}
   --output ${OUTPUT_DIR} \
   --experiment ${EXP_NAME} \
   --seed 42 \
+    --pretrained \
+  --pretrained_type deit
