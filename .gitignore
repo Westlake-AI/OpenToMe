@@ -120,3 +120,4 @@ data
 work_dirs
 results
 *.txt
+*.pdf

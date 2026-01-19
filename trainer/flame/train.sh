@@ -65,16 +65,30 @@ path=$(grep -oP '(?<=--job.dump_folder )[^ ]+' <<< "$params")
 steps=$(grep -oP '(?<=--training.steps )[^ ]+' <<< "$params")
 config=$(grep -oP '(?<=--model.config )[^ ]+' <<< "$params")
 tokenizer=$(grep -oP '(?<=--model.tokenizer_path )[^ ]+' <<< "$params")
+
+# Register model before trying to load config
+if [[ ! -z "${BACKBONE}" ]]; then
+  if [[ "$BACKBONE" == *"gated_deltanet"* ]]; then
+    python -c "import opentome.models.gated_deltanet" 2>/dev/null || true
+  elif [[ "$BACKBONE" == *"delta_net"* ]]; then
+    python -c "import opentome.models.delta_net" 2>/dev/null || true
+  elif [[ "$BACKBONE" == *"gla"* ]]; then
+    python -c "import opentome.models.gla" 2>/dev/null || true
+  elif [[ "$BACKBONE" == *"transformer"* ]]; then
+    python -c "import opentome.models.transformer" 2>/dev/null || true
+  fi
+fi
+
 model=$(
   python -c "import fla, sys; from transformers import AutoConfig; print(AutoConfig.from_pretrained(sys.argv[1]).to_json_string())" "$config" | jq -r '.model_type'
 )
 
 mkdir -p $path
-cp * $path
-cp -r configs $path
-cp -r flame   $path
-cp -r 3rdparty/flash-linear-attention/fla $path
-cp -r 3rdparty/torchtitan/torchtitan $path
+cp * $path 2>/dev/null || true
+cp -r configs $path 2>/dev/null || true
+cp -r flame   $path 2>/dev/null || true
+# cp -r 3rdparty/flash-linear-attention/fla $path 2>/dev/null || true
+# cp -r 3rdparty/torchtitan/torchtitan $path 2>/dev/null || true
 
 # for offline systems
 # export TRANSFORMERS_OFFLINE=1

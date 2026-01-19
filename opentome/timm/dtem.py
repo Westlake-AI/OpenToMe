@@ -326,7 +326,7 @@ class DTEMBlock(Block):
                 khot = torch.zeros_like(_x)
                 _x_iter = _x.clone()  # Clone to avoid inplace modification
                 for _ in range(k):
-                    onehot_approx = F.softmax(_x_iter.view(B, -1) / (self._tome_info.get("tau2", 0.1)), dim=-1).view(B, Na, Nb)
+                    onehot_approx = F.softmax(_x_iter.view(B, -1) * self._tome_info.get("tau2", 30.0), dim=-1).view(B, Na, Nb)
                     khot += onehot_approx
                     khot_mask = torch.clamp(1 - onehot_approx.sum(dim=-1, keepdim=True), min=EPSILON)
                     _x_iter = _x_iter + torch.log(khot_mask)
@@ -369,7 +369,7 @@ class DTEMBlock(Block):
                 khot = torch.zeros_like(local_scores)
                 local_scores_iter = local_scores.clone()  # Clone to avoid inplace modification
                 for _ in range(k):
-                    onehot_approx = F.softmax(local_scores_iter / (self._tome_info.get("tau2", 0.1)), dim=-1)
+                    onehot_approx = F.softmax(local_scores_iter * self._tome_info.get("tau2", 30.0), dim=-1)
                     khot += onehot_approx
                     khot_mask = torch.clamp(1 - onehot_approx.sum(dim=-1, keepdim=True), min=EPSILON)
                     local_scores_iter = local_scores_iter + torch.log(khot_mask)
@@ -443,8 +443,15 @@ class DTEMBlock(Block):
         B, T, C = x.shape
         device = x.device
         
-        # Random grouping: split tokens (excluding cls) into two groups
-        n_tokens = n - 1  # exclude cls token at position 0
+        # Random grouping: split tokens (excluding cls if present) into two groups
+        has_cls = self._tome_info.get("class_token", True)
+        if has_cls:
+            n_tokens = n - 1  # exclude cls token at position 0
+            offset = 1
+        else:
+            n_tokens = n
+            offset = 0
+        
         Na = n_tokens // 2
         Nb = n_tokens - Na
         
@@ -452,8 +459,8 @@ class DTEMBlock(Block):
         # Use argsort of random values to get permutation
         rand_vals = torch.rand(B, n_tokens, device=device)
         rand_perm = torch.argsort(rand_vals, dim=1)  # [B, n_tokens]
-        a_idx = rand_perm[:, :Na] + 1  # +1 because we skip cls at position 0
-        b_idx = rand_perm[:, Na:] + 1
+        a_idx = rand_perm[:, :Na] + offset  # +offset to skip cls if present
+        b_idx = rand_perm[:, Na:] + offset
 
         # 暂时把 a_idx 和 b_idx 改回奇偶分组
         # a_idx = torch.arange(1, n, 2, device=device).unsqueeze(0).expand(B, -1)
@@ -527,28 +534,47 @@ class DTEMBlock(Block):
             physical_mask = valid_mask.clone()  # Start with valid_mask
             if a_orig_idx is not None and b_orig_idx is not None:
                 # For each a[i], check if |a_orig_idx[i] - b_orig_idx[b_indices[i,j]]| <= window_size
-                # a_orig_idx: (B, Na) -> (B, Na, 1)
+                # NOTE: a_orig_idx and b_orig_idx may have been aligned in _select if Na != Nb
+                # So their shape[1] may be min(Na, Nb), not the original Na/Nb
+                # a_orig_idx: (B, Na_aligned) -> (B, Na_aligned, 1)
                 # b_indices: (1, Na, 2*window_size+1)
-                # b_orig_idx: (B, Nb)
+                # b_orig_idx: (B, Nb_aligned)
                 
-                a_orig_expanded = a_orig_idx.unsqueeze(2)  # (B, Na, 1)
-                b_indices_clamped = b_indices.clamp(0, Nb_cur - 1)  # (1, Na, 2*window_size+1)
-                b_indices_expanded = b_indices_clamped.expand(B_cur, -1, -1)  # (B, Na, 2*window_size+1)
+                # Use actual shapes from orig_idx tensors
+                Na_aligned = a_orig_idx.shape[1]
+                Nb_aligned = b_orig_idx.shape[1]
                 
-                # Gather b's original positions at window indices
-                # b_orig_idx: (B, Nb) -> expand to (B, Na, Nb) -> gather with index (B, Na, 2*w+1)
-                batch_idx = torch.arange(B_cur, device=b_orig_idx.device).view(-1, 1, 1)  # (B, 1, 1)
-                b_orig_at_window = b_orig_idx[batch_idx, b_indices_expanded]  # (B, Na, 2*w+1)
+                # Only proceed if aligned sizes match current assign shape
+                if Na_aligned == Na_cur:
+                    a_orig_expanded = a_orig_idx.unsqueeze(2)  # (B, Na_aligned, 1)
+                    # Clamp b_indices to valid range of b_orig_idx
+                    b_indices_clamped = b_indices.clamp(0, Nb_aligned - 1)  # (1, Na, 2*window_size+1)
+                    b_indices_expanded = b_indices_clamped.expand(B_cur, -1, -1)  # (B, Na, 2*window_size+1)
+                    
+                    # If Na from b_indices doesn't match Na_aligned, truncate
+                    if b_indices_expanded.shape[1] > Na_aligned:
+                        b_indices_expanded = b_indices_expanded[:, :Na_aligned, :]
+                    
+                    # Ensure indices are within bounds
+                    b_indices_expanded = b_indices_expanded.clamp(0, Nb_aligned - 1)
                 
-                # Check physical distance
-                physical_distance = torch.abs(a_orig_expanded - b_orig_at_window)  # (B, Na, 2*w+1)
-                physical_local_mask = physical_distance <= window_size  # (B, Na, 2*w+1)
+                    # Gather b's original positions at window indices
+                    b_orig_expanded = b_orig_idx.unsqueeze(1).expand(-1, Na_aligned, -1)  # (B, Na_aligned, Nb_aligned)
+                    b_orig_at_window = torch.gather(
+                        b_orig_expanded,  # (B, Na_aligned, Nb_aligned)
+                        dim=2,
+                        index=b_indices_expanded  # (B, Na_aligned, 2*window_size+1)
+                    )  # (B, Na_aligned, 2*w+1)
                 
-                # Combine with valid_mask
-                physical_mask = valid_mask & physical_local_mask  # (B, Na, 2*w+1)
+                    # Check physical distance
+                    physical_distance = torch.abs(a_orig_expanded - b_orig_at_window)  # (B, Na_aligned, 2*w+1)
+                    physical_local_mask = physical_distance <= window_size  # (B, Na_aligned, 2*w+1)
+                
+                    # Combine with valid_mask
+                    physical_mask = valid_mask & physical_local_mask  # (B, Na, 2*w+1)
             
-            # Apply physical mask to assign
-            assign = assign * physical_mask.float()
+            # Apply physical mask to assign (use same dtype as assign)
+            assign = assign * physical_mask.to(assign.dtype)
             
             # Clamp indices for scatter operation
             b_indices_clamped = b_indices.clamp(0, Nb_cur - 1)  # (1, Na, 2*window_size+1)
@@ -642,8 +668,8 @@ class DTEMBlock(Block):
                 valid_target = (target_k >= 0) & (target_k < width)
                 target_k_clamped = target_k.clamp(0, width - 1)
                 
-                # Apply valid mask
-                transferred_masked = transferred * valid_target.float()
+                # Apply valid mask (use same dtype as transferred)
+                transferred_masked = transferred * valid_target.to(transferred.dtype)
                 
                 # Scatter to source_b using b_indices
                 batch_idx = torch.arange(B_cur, device=x.device).view(-1, 1, 1, 1)
@@ -657,11 +683,12 @@ class DTEMBlock(Block):
                 source_b_flat.scatter_add_(0, linear_idx.reshape(-1), transferred_masked.reshape(-1))
                 source_b_new = source_b_flat.reshape(B_cur, Nb_cur, width)
                 
-                # OPTIMIZED: Reuse 'transferred' instead of recalculating
-                # Original: total_transferred = (assign.unsqueeze(-1) * source_a.unsqueeze(2)).sum(dim=2)
-                # Optimized: sum the already-computed 'transferred' tensor (54% faster)
-                total_transferred = transferred.sum(dim=2)  # (B, Na, width)
-                source_a_new = source_a - total_transferred
+                # Update source_a with SAME logic as wa update
+                # wa uses: wa * (tmp + (clamp(tmp, 0, 1) - tmp).detach())
+                # source_a should use the SAME scaling factor
+                # Note: source_a.sum(dim=-1) should equal wa after this operation
+                tmp_source = tmp.unsqueeze(-1)  # (B, Na, 1) - broadcast over width dimension
+                source_a_new = source_a * (tmp_source + (torch.clamp(tmp_source, min=0., max=1.) - tmp_source).detach())
             else:
                 # Global case: similar logic but with full assign matrix
                 # For simplicity, keep source unchanged in global mode for now
@@ -717,9 +744,14 @@ class DTEMBlock(Block):
 
         # =================================================================================== #
         
-
-        x_output = torch.cat([x[:, :1], nx, x[:, n:]], dim=1)
-        size_output = torch.cat([size[:, :1, 0], w, size[:, n:, 0]], dim=-1).unsqueeze(-1)
+        # Handle cls token if present
+        has_cls = self._tome_info.get("class_token", True)
+        if has_cls:
+            x_output = torch.cat([x[:, :1], nx, x[:, n:]], dim=1)
+            size_output = torch.cat([size[:, :1, 0], w, size[:, n:, 0]], dim=-1).unsqueeze(-1)
+        else:
+            x_output = torch.cat([nx, x[:, n:]], dim=1)
+            size_output = torch.cat([w, size[:, n:, 0]], dim=-1).unsqueeze(-1)
         return x_output, size_output, n , _out, source_matrix
 
     def _merge_eval(self, x, size, r, metric, source_matrix=None):    # eval：保留 ToMe 行为。弃用。
@@ -847,7 +879,7 @@ def dtem_apply_patch(
         "source_tracking_mode": source_tracking_mode,
         "k2": None,
         "tau1": 1.0,
-        "tau2": 0.1,
+            "tau2": 30.0,  # Temperature for softmax/ThreTopK (higher = smoother)
         "feat_dim": feat_dim,
         "window_size": window_size,
         "t": t,

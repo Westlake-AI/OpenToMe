@@ -5,7 +5,7 @@ export HF_ENDPOINT=https://hf-mirror.com
 export BACKBONE=delta_net_340M
 echo $BACKBONE
 
-NNODE=1 NGPU=8 LOG_RANK=0 bash train.sh \
+NNODE=1 NGPU=2 LOG_RANK=0 bash train.sh \
   --job.config_file flame/models/fla.toml \
   --job.dump_folder exp/delta_net_340M_10B/batch1.seqlen32768.grad_acc2.warmup1024.update1.steps30720.8gpus.lr3e-4 \
   --model.config configs/delta_net_340M.json \
