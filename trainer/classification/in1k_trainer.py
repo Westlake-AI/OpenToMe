@@ -41,9 +41,14 @@ from timm.utils import ApexScaler, NativeScaler
 from fvcore.nn import FlopCountAnalysis
 from fvcore.nn import flop_count_table
 
+USE_OLD_MERGENET = os.getenv("OPENTOME_MERGENET_IMPL", "new").lower() in {"old", "model_old", "legacy"}
+
 import opentome.models.deit
 from opentome.models.deit.deit import deit_s, deit_s_extend  # Import to register models
-from opentome.models.mergenet.model import HybridToMeModel
+if USE_OLD_MERGENET:
+    import opentome.models.mergenet.model_old  # register old HybridToMe models
+else:
+    import opentome.models.mergenet.model  # register new HybridToMe models
 from opentome.utils.dataset_loader import build_dataset
 
 try:
@@ -91,6 +96,8 @@ parser.add_argument('--train_split', metavar='NAME', default='train',
                     help='dataset train split (default: train)')
 parser.add_argument('--val_split', metavar='NAME', default='validation',
                     help='dataset validation split (default: validation)')
+parser.add_argument('--debug_subset', type=int, default=0,
+                    help='Use only the first N samples for fast sanity check (0=disabled)')
 parser.add_argument('--dataset_download', action='store_true', default=False,
                     help='Allow download of dataset for torch/ and tfds/ datasets that support it.')
 parser.add_argument('--class_map', default='', type=str, metavar='FILENAME',
@@ -145,10 +152,10 @@ parser.add_argument("--total_merge_latent", type=int, default=4,
                     help="Total number of latent tokens to merge.")
 parser.add_argument("--use_softkmax", action='store_true', default=False,
                     help="Use softkmax variant in DTEM.")
-parser.add_argument("--num_local_blocks", type=int, default=0,
-                    help="Number of additional local blocks before DTEM blocks.")
 parser.add_argument("--local_block_window", type=int, default=16,
                     help="Window size for additional local blocks.")
+parser.add_argument("--num_local_blocks", type=int, default=0,
+                    help="Number of extra LocalBlocks before DTEM blocks (old HybridToMe only).")
 parser.add_argument("--pretrained_type", type=str, default='vit', choices=['vit', 'deit'],
                     help='Type of pretrained model for Local Encoder: vit or deit (default: vit)')
 parser.add_argument("--load_full_pretrained", action='store_true', default=False,
@@ -442,7 +449,6 @@ def main():
             'lambda_local': args.lambda_local,
             'total_merge_latent': args.total_merge_latent,
             'use_softkmax': args.use_softkmax,
-            'num_local_blocks': args.num_local_blocks,
             'local_block_window': args.local_block_window,
             'tome_window_size': args.tome_window_size,
             'tome_use_naive_local': args.tome_use_naive_local,
@@ -450,6 +456,8 @@ def main():
             'pretrained_type': args.pretrained_type,
             'load_full_pretrained': load_full_pretrained,
         })
+        if USE_OLD_MERGENET:
+            model_kwargs['num_local_blocks'] = args.num_local_blocks
     # DeiT models
     elif 'deit' in args.model.lower():
         model_kwargs.update({

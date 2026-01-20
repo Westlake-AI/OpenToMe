@@ -146,6 +146,10 @@ def deit_s(pretrained=False, **kwargs):
                  'drop_path_rate', 'num_classes']
     }
     model = DeiTModel(arch='small', pretrained=pretrained, **supported_kwargs)
+    # 在断点前打印patch_size
+    patch_size = supported_kwargs.get('patch_size', getattr(model, 'patch_size', None))
+    print(f'[DEBUG] patch_size: {patch_size}')
+    import pdb; pdb.set_trace()
     return model
 
 

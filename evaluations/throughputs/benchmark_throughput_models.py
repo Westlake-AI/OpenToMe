@@ -14,7 +14,6 @@ def bench_model(model_name: str,
                 embed_dim: int,
                 num_heads: int,
                 mlp_ratio: float,
-                local_depth: int,
                 latent_depth: int,
                 dtem_window_size: Optional[int],
                 tome_window_size: Optional[int],
@@ -32,8 +31,27 @@ def bench_model(model_name: str,
     try:
         x = torch.randn(batch_size, 3, img_size, img_size, device=device, requires_grad=(mode == 'fwd_bwd'))
 
+        arch = None
+        local_depth = None
+        if embed_dim == 384:
+            if latent_depth == 12:
+                arch = 's_ext'  # small_extend
+            elif latent_depth == 8:
+                arch = 'small'
+            else:
+                raise ValueError(f"Unsupported latent_depth {latent_depth} for embed_dim=384. Supported: 8 (small), 12 (s_ext)")
+        elif embed_dim == 768:
+            if latent_depth == 8:
+                arch = 'base'
+            else:
+                raise ValueError(f"Unsupported latent_depth {latent_depth} for embed_dim=768. Supported: 8 (base)")
+        else:
+            raise ValueError(f"Unsupported embed_dim: {embed_dim}. Supported: 384 (small/s_ext), 768 (base)")
+
         if model_name == 'flash':
             from opentome.models.model_flashattn import FlashAttentionModel
+            from opentome.models.mergenet.model import HybridToMeModel
+            local_depth = HybridToMeModel.arch_zoo[arch]["local_depth"]
             depth = local_depth + latent_depth
             model = FlashAttentionModel(
                 img_size=img_size,
@@ -46,23 +64,6 @@ def bench_model(model_name: str,
             ).to(device)
         elif model_name == 'hybrid':
             from opentome.models.mergenet.model import HybridToMeModel
-            # Determine arch based on embed_dim and latent_depth
-            # arch_zoo: small (latent_depth=8), s_ext (latent_depth=12), base (latent_depth=8)
-            if embed_dim == 384:
-                if latent_depth == 12:
-                    arch = 's_ext'  # small_extend
-                elif latent_depth == 8:
-                    arch = 'small'
-                else:
-                    raise ValueError(f"Unsupported latent_depth {latent_depth} for embed_dim=384. Supported: 8 (small), 12 (s_ext)")
-            elif embed_dim == 768:
-                if latent_depth == 8:
-                    arch = 'base'
-                else:
-                    raise ValueError(f"Unsupported latent_depth {latent_depth} for embed_dim=768. Supported: 8 (base)")
-            else:
-                raise ValueError(f"Unsupported embed_dim: {embed_dim}. Supported: 384 (small/s_ext), 768 (base)")
-            
             # Calculate lambda_local from total_merge_local
             num_patches = (img_size // patch_size) ** 2
             if total_merge_local > 0:
@@ -169,7 +170,6 @@ def get_args():
     parser.add_argument('--embed_dim', type=int, default=384)
     parser.add_argument('--num_heads', type=int, default=6)
     parser.add_argument('--mlp_ratio', type=float, default=4.0)
-    parser.add_argument('--local_depth', type=int, default=4)
     parser.add_argument('--latent_depth', type=int, default=12)
     parser.add_argument('--dtem_window_size', type=int, default=8)
     parser.add_argument('--tome_window_size', type=int, default=None)
@@ -210,7 +210,6 @@ def main():
                         embed_dim=args.embed_dim,
                         num_heads=args.num_heads,
                         mlp_ratio=args.mlp_ratio,
-                        local_depth=args.local_depth,
                         latent_depth=args.latent_depth,
                         dtem_window_size=args.dtem_window_size,
                         tome_window_size=args.tome_window_size,
@@ -233,7 +232,6 @@ def main():
                         'embed_dim': args.embed_dim,
                         'num_heads': args.num_heads,
                         'mlp_ratio': args.mlp_ratio,
-                        'local_depth': args.local_depth,
                         'latent_depth': args.latent_depth,
                         'dtem_window_size': args.dtem_window_size,
                         'tome_window_size': args.tome_window_size,
@@ -258,7 +256,6 @@ def main():
                             'embed_dim': args.embed_dim,
                             'num_heads': args.num_heads,
                             'mlp_ratio': args.mlp_ratio,
-                            'local_depth': args.local_depth,
                             'latent_depth': args.latent_depth,
                             'dtem_window_size': args.dtem_window_size,
                             'tome_window_size': args.tome_window_size,

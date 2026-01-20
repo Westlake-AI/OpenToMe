@@ -103,18 +103,20 @@ class MyCrossAttention(nn.Module):
         else:
             B = Bq
 
-        # Attention scores
-        attn_scores = torch.matmul(q_proj, k_proj.transpose(-2, -1)) / (self.head_dim ** 0.5)
+        # Attention scores (compute in float32 for numerical stability)
+        attn_scores = torch.matmul(
+            q_proj.float(), k_proj.float().transpose(-2, -1)
+        ) / (self.head_dim ** 0.5)
         
         if mask is not None:
-            attn_scores = attn_scores + mask.unsqueeze(1)
+            attn_scores = attn_scores + mask.unsqueeze(1).float()
         
         attn_probs = torch.softmax(attn_scores, dim=-1)
         attn_probs = torch.nn.functional.dropout(attn_probs, p=self.attn_drop, training=self.training)
         
-        context = torch.matmul(attn_probs, v_proj)
+        context = torch.matmul(attn_probs, v_proj.float())
         context = context.transpose(1, 2).reshape(B, Nq, self.embed_dim)
-        context = self.out_proj(context)
+        context = self.out_proj(context.to(q_proj.dtype))
         context = self.proj_drop(context)
         return context
 
@@ -293,11 +295,11 @@ class LocalEncoderNLP(nn.Module):
                 qk_norm=config.qk_norm,
                 proj_drop=config.drop_rate,
                 attn_drop=config.attn_drop_rate,
-                drop_path=config.drop_path_rate * (i / max(config.num_encoder_layers - 1, 1)),  # Stochastic depth
+                drop_path=config.drop_path_rate * (i / max(config.local_depth - 1, 1)),  # Stochastic depth
                 norm_layer=nn.LayerNorm,
                 use_flash_attn=False,  # Will use custom attention in DTEM
             )
-            for i in range(config.num_encoder_layers)
+            for i in range(config.local_depth)
         ])
         
         # Apply DTEM patch (directly use dtem.py logic)
@@ -323,7 +325,7 @@ class LocalEncoderNLP(nn.Module):
             "tau1": 1.0,
             "tau2": 30.0,
             "feat_dim": feat_dim,
-            "local_depth": self.config.num_encoder_layers,
+            "local_depth": self.config.local_depth,
             "swa_size": self.config.dtem_window_size,
         }
         
@@ -354,7 +356,7 @@ class LocalEncoderNLP(nn.Module):
         
         # Calculate total merge count: L - L/lambda
         total_merge = int(L * (1 - 1/self.config.lambda_local))
-        r_per_layer = total_merge // max(self.config.num_encoder_layers, 1)
+        r_per_layer = total_merge // max(self.config.local_depth, 1)
         
         # Initialize
         n = L
@@ -380,6 +382,16 @@ class LocalEncoderNLP(nn.Module):
                 n=n, 
                 source_matrix=source_matrix
             )
+            # Guard against NaN/Inf from DTEM attention (debug stability)
+            if not torch.isfinite(hidden_states).all():
+                warnings.warn(
+                    "Non-finite values detected in LocalEncoderNLP output; "
+                    "applying nan_to_num fallback.",
+                    stacklevel=2,
+                )
+                hidden_states = torch.nan_to_num(hidden_states, nan=0.0, posinf=1e4, neginf=-1e4)
+            if size is not None and not torch.isfinite(size).all():
+                size = torch.nan_to_num(size, nan=0.0, posinf=1e4, neginf=-1e4)
             self._tome_info["token_counts_local"].append(hidden_states.shape[1])
         
         # Store source matrix info
@@ -527,7 +539,7 @@ class LocalDecoder(nn.Module):
         # Combine grid bias and band mask
         combined_mask = grid_bias + mask_val
         combined_mask = combined_mask.to(torch.bfloat16)
-        import pdb;pdb.set_trace()
+        # import pdb;pdb.set_trace()
         # Cross-attention: Q from bytes, KV from latent words
         decoded_states = self.cross_attention(query_states, latent_words, mask=combined_mask)
         
@@ -668,25 +680,26 @@ class MergeNetModel(MergeNetPreTrainedModel):
                 weighted_offset = (source_matrix * offset_relative.view(1, 1, -1)).sum(dim=-1)  # (B, N_merged)
                 
                 # Center of mass = position + weighted_offset / size
-                token_center_of_mass = i_positions.float() + weighted_offset / size[..., 0].clamp(min=1e-6)
+                token_center_of_mass = i_positions.float() + weighted_offset / size[..., 0].detach().clamp(min=1e-6)
         else:
             # Fallback: use position indices
             token_center_of_mass = torch.arange(N_merged, device=device).unsqueeze(0).expand(B, -1).float()
         
-        # Calculate target number of latent words: k = L / lambda
-        k = int(L / self.config.lambda_local)
-        k = min(k, N_merged)  # Ensure k doesn't exceed available tokens
+        # Target latent count should align with LoE merge result
+        k = L - info_local.get("total_merge", 0)
+        k = max(1, min(k, N_merged))  # Ensure k is valid
         
         # TopK selection by token size (strength)
         token_strength = size[..., 0]  # (B, N_merged)
-        topk_vals, topk_indices = torch.topk(token_strength, k, dim=1, largest=True, sorted=False)
-        
-        # Gather selected tokens' center of mass
-        topk_com = torch.gather(token_center_of_mass, 1, topk_indices)  # (B, k)
-        
-        # Sort by center of mass to maintain spatial order
-        sorted_order = torch.argsort(topk_com, dim=1)
-        sorted_topk_indices = torch.gather(topk_indices, 1, sorted_order)  # (B, k)
+        with torch.no_grad():
+            topk_vals, topk_indices = torch.topk(token_strength.detach(), k, dim=1, largest=True, sorted=False)
+            
+            # Gather selected tokens' center of mass
+            topk_com = torch.gather(token_center_of_mass, 1, topk_indices)  # (B, k)
+            
+            # Sort by center of mass to maintain spatial order
+            sorted_order = torch.argsort(topk_com, dim=1)
+            sorted_topk_indices = torch.gather(topk_indices, 1, sorted_order)  # (B, k)
         
         # Gather selected tokens
         topk_tokens = torch.gather(
@@ -1040,7 +1053,7 @@ class MergeNetForCausalLM(MergeNetPreTrainedModel):
         
         # Initialize generation state
         current_pos = L_prompt  # Current byte position
-        import pdb;pdb.set_trace()
+        # import pdb;pdb.set_trace()
         for step in range(max_length - L_prompt):
             # === Decoding: Use LAST byte's H as query, O_queue as KV ===
             # Get H for the most recent byte

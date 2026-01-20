@@ -25,7 +25,6 @@ def get_args():
     parser.add_argument('--img_size', type=int, default=224)
     parser.add_argument('--patch_size', type=int, default=16)
     parser.add_argument('--embed_dim', type=int, default=384)
-    parser.add_argument('--local_depth', type=int, default=4)
     parser.add_argument('--latent_depth', type=int, default=12)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=1)
@@ -63,7 +62,8 @@ def main():
 
     train_loader, test_loader = make_dataloaders(args.img_size, args.batch_size)
 
-    depth = args.local_depth + args.latent_depth
+    local_depth = 4
+    depth = local_depth + args.latent_depth
     model = FlashAttentionModel(
         img_size=args.img_size,
         patch_size=args.patch_size,

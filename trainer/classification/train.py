@@ -23,7 +23,6 @@ def get_args():
     parser.add_argument('--img_size', type=int, default=224)
     parser.add_argument('--patch_size', type=int, default=16)
     parser.add_argument('--embed_dim', type=int, default=768)
-    parser.add_argument('--local_depth', type=int, default=4)
     parser.add_argument('--latent_depth', type=int, default=12)
     parser.add_argument('--batch_size', type=int, default=32)
     parser.add_argument('--epochs', type=int, default=1)
@@ -90,7 +89,7 @@ def main():
     model = HybridToMeModel(img_size=args.img_size, patch_size=args.patch_size,
                             embed_dim=args.embed_dim, num_heads=args.num_heads,
                             mlp_ratio=args.mlp_ratio, dtem_feat_dim=64,
-                            local_depth=args.local_depth, latent_depth=args.latent_depth,
+                            latent_depth=args.latent_depth,
                             tome_use_naive_local=False, lambda_local=args.lambda_local, total_merge_latent=args.merge_latent,
                             dtem_window_size=args.dtem_window_size, tome_window_size=args.tome_window_size, use_softkmax=args.use_softkmax)
 
@@ -170,4 +169,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-# python /yuchang/yk/OpenToMe/trainer/classification/train.py --epochs 20 --batch_size 512 --img_size 224 --local_depth 4 --latent_depth 12 --lambda_local 4 --merge_latent 4 --use_softkmax
+# python /yuchang/yk/OpenToMe/trainer/classification/train.py --epochs 20 --batch_size 512 --img_size 224 --latent_depth 12 --lambda_local 4 --merge_latent 4 --use_softkmax

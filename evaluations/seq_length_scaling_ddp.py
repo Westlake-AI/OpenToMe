@@ -78,7 +78,6 @@ def build_mergenet(args, img_size: int) -> torch.nn.Module:
         total_merge_latent=args.total_merge_latent,
         dtem_t=args.dtem_t,
         use_softkmax=args.use_softkmax,
-        num_local_blocks=args.num_local_blocks,
         local_block_window=args.local_block_window,
     )
     # 论文中的 DTEM 温度默认值（保持与训练脚本一致）
@@ -365,7 +364,6 @@ def get_args():
     parser.add_argument("--dtem-t", type=int, default=1)
     parser.add_argument("--use-softkmax", action="store_true")
     parser.add_argument("--dtem-feat-dim", type=int, default=64)
-    parser.add_argument("--num-local-blocks", type=int, default=0)
     parser.add_argument("--local-block-window", type=int, default=16)
     parser.add_argument("--k2", type=float, default=4.0)
     parser.add_argument("--tau1", type=float, default=1.0)

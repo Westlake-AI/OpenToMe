@@ -7,7 +7,7 @@ from timm.layers import trunc_normal_
 from timm.models.registry import register_model
 
 # from opentome.timm.tome import tome_apply_patch
-from opentome.timm.dtem import DTEMBlock
+from opentome.timm.dtem import dtem_apply_patch, trace_token_merge, token_unmerge_from_map_for_dtem
 from opentome.tome.tome import token_unmerge_from_map, parse_r
 from opentome.timm.bias_local_attn import LocalBlock
 
@@ -106,164 +106,68 @@ class MyCrossAttention(nn.Module):
         context = self.proj_drop(context)
         return context
 
-class DTEMMergeOnly(DTEMBlock):
-    """
-    DTEM merge-only helper (no attention/MLP parameters).
-    Reuses DTEMBlock's selection + merge logic without creating unused params.
-    """
-
-    def __init__(self):
-        nn.Module.__init__(self)
-
 class LocalEncoder(nn.Module):
     def __init__(self, img_size=224, patch_size=16, embed_dim=768, num_heads=12, mlp_ratio=4.0,
-                 local_depth: int = 4, drop_rate=0.0, attn_drop_rate=0.0, drop_path_rate=0.0,
-                 dtem_feat_dim=None, dtem_window_size: int = None, dtem_t: int = 1,
-                 total_merge_local: int = 0, use_softkmax: bool = False, swa_size: int = None,
-                 local_block_window: int = 16):
+                 depth=4, drop_rate=0.0, attn_drop_rate=0.0, drop_path_rate=0.0,
+                 feat_dim=None, window_size: int = None, r: int = 2, t: int = 1, num_classes=10,
+                 num_local_blocks: int = 0, local_block_window: int = 16):
         super().__init__()
-
-        if local_depth <= 0:
-            raise ValueError("local_depth must be >= 1")
-
-        self.local_depth = local_depth
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-
-        # 基础 ViT 结构只用于 patch/pos embed 与 norm
+        
+        # 添加额外的 LocalBlocks（在 DTEM blocks 之前）
+        self.num_local_blocks = num_local_blocks
+        if num_local_blocks > 0:
+            self.local_blocks = nn.ModuleList([
+                LocalBlock(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=True,
+                    local_window=local_block_window,
+                )
+                for _ in range(num_local_blocks)
+            ])
+        else:
+            self.local_blocks = None
+        
         self.vit = VisionTransformer(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim,
-                                     depth=0, num_heads=num_heads, mlp_ratio=mlp_ratio,
+                                     depth=depth, num_heads=num_heads, mlp_ratio=mlp_ratio,
                                      qkv_bias=True, num_classes=0,
                                      drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate)
-
-        # Local Transformer Blocks（全长度 token）
-        dpr = torch.linspace(0, drop_path_rate, local_depth).tolist()
-        self.vit.blocks = nn.ModuleList([
-            LocalBlock(
-                dim=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=True,
-                attn_drop=attn_drop_rate,
-                proj_drop=drop_rate,
-                drop_path=dpr[i],
-                local_window=local_block_window,
-            )
-            for i in range(local_depth)
-        ])
-
-        # DTEM metric head（每层一个）
-        self.metric_dim = self._resolve_metric_dim(embed_dim, num_heads, dtem_feat_dim)
-        self.metric_layers = nn.ModuleList([
-            nn.Linear(embed_dim, self.metric_dim) for _ in range(local_depth)
-        ])
-
-        # 仅复用 DTEM 的 merge 逻辑（attention 不参与）
-        self.merge_block = DTEMMergeOnly()
-
-        window_size = dtem_window_size if dtem_window_size is not None else 0
-        self._tome_info = {
-            "r": None,
-            "size": None,
-            "source_matrix": None,
-            "total_merge": total_merge_local,
-            "trace_source": True,
-            "prop_attn": True,
-            "class_token": True,
-            "distill_token": False,
-            "source_tracking_mode": "matrix",
-            "k2": None,
-            "tau1": 1.0,
-            "tau2": 30.0,
-            "feat_dim": self.metric_dim,
-            "window_size": window_size,
-            "t": dtem_t,
-            "use_softkmax": use_softkmax,
-            "swa_size": swa_size,
-            "local_depth": local_depth,
-        }
-        # 共享 info 给 merge block
-        self.merge_block._tome_info = self._tome_info
-        # 兼容旧路径读取
-        self.vit._tome_info = self._tome_info
-        self.default_r = total_merge_local // max(local_depth, 1)
-
-    @staticmethod
-    def _resolve_metric_dim(embed_dim: int, num_heads: int, dtem_feat_dim):
-        if dtem_feat_dim is not None:
-            return dtem_feat_dim
-        head_dim = embed_dim // num_heads
-        return head_dim if embed_dim < 1024 else 2 * head_dim
-
-    def _aggregate_with_source_matrix(self, x, size, source_matrix):
-        if source_matrix is None:
-            return x
-        center = self._tome_info["source_matrix_center"]
-        width = self._tome_info["source_matrix_width"]
-        B, N, C = x.shape
-        device = x.device
-
-        # Memory-saving path: avoid materializing (B, N, width, C)
-        summed = torch.zeros_like(x)
-        base_positions = torch.arange(N, device=device)
-        for offset in range(width):
-            pos = base_positions + (offset - center)
-            valid = (pos >= 0) & (pos < N)
-            pos_clamped = pos.clamp(0, N - 1)
-            gathered = x[:, pos_clamped, :]  # (B, N, C)
-            weight = source_matrix[:, :, offset]
-            if not valid.all():
-                weight = weight * valid.to(x.dtype)
-            summed = summed + gathered * weight.unsqueeze(-1)
-
-        if size is not None:
-            denom = size.squeeze(-1).clamp(min=1e-6).unsqueeze(-1)
-        else:
-            denom = source_matrix.sum(dim=-1, keepdim=True).clamp(min=1e-6)
-        return summed / denom
+        # Note: Pretrained weights loading is handled by HybridToMeModel._load_full_pretrained_weights()
 
     def forward(self, x):
         x = self.vit.patch_embed(x)  # automatically inserted cls_token after patch_embed
         x = self.vit._pos_embed(x)
         x = self.vit.patch_drop(x)
+        
+        # 重置跨 batch 的踪迹与屏蔽，避免状态泄漏
+        # self.vit._tome_info["token_mask_for_dtem"] = None
+        # 与 timm 的 ViT 对齐，启用 norm_pre
         x = self.vit.norm_pre(x)
-
         n = x.shape[1]
-        x_layers = []
-        for local_blk in self.vit.blocks:
-            x = local_blk(x)
-            x_layers.append(x)
-        if not x_layers:
-            raise RuntimeError("LocalEncoder requires at least one local block.")
-        x_embed = x_layers[-1]
-        x_merge = x_embed
-        r_list = parse_r(
-            self.local_depth,
-            self.default_r,
-            self._tome_info.get("total_merge", None),
-        )
-        self._tome_info["r"] = r_list
-        self._tome_info["size"] = torch.ones_like(x[..., 0:1])
-        self._tome_info["token_counts_local"] = []
-
-        size = self._tome_info["size"]
-        source_matrix = None
-
-        for i, layer_x in enumerate(x_layers):
-            x_metric = self._aggregate_with_source_matrix(layer_x, size, source_matrix)
-            metric = self.metric_layers[i](x_metric.detach())
-            r = r_list[i] if i < len(r_list) else 0
-
-            x_merge, size, n, _, source_matrix = self.merge_block._merge_train(
-                x_merge, size, r, n, {"metric": metric}, source_matrix
-            )
-
-            self._tome_info["size"] = size
-            self._tome_info["token_counts_local"].append(x_merge.shape[1])
-
-        x_out = self.vit.norm(x_merge)
-        self._tome_info["source_matrix"] = source_matrix
-        return x_out, x_embed, self._tome_info["size"], self._tome_info
+        self.vit._tome_info["r"] = parse_r(len(self.vit.blocks), self.vit.r, self.vit._tome_info.get("total_merge", None))
+        self.vit._tome_info["size"] = torch.ones_like(x[..., 0:1])
+        self.vit._tome_info["token_counts_local"] = []
+        
+        # 检查cls_token判断
+        # has_cls_token = hasattr(self.vit, 'cls_token') and self.vit.cls_token is not None
+        # num_prefix_tokens = getattr(self.vit, 'num_prefix_tokens', 0)
+        # print(f"[LocalEncoder] has_cls_token: {has_cls_token}, num_prefix_tokens: {num_prefix_tokens}")
+        
+        # 先运行额外的 LocalBlocks（不改变 size, n, source_matrix）
+        if self.local_blocks is not None:
+            for local_blk in self.local_blocks:
+                x = local_blk(x)
+        x_embed = x.clone()  # 保存未merge的embedding用于后续cross attention
+        source_matrix = None  # Initialize, will be created in first block
+        for i, blk in enumerate(self.vit.blocks):
+            x, size, n, _, source_matrix = blk(x, self.vit._tome_info["size"], n=n, source_matrix=source_matrix)
+            self.vit._tome_info["size"] = size
+            self.vit._tome_info["token_counts_local"].append(x.shape[1])
+        x = self.vit.norm(x)
+        # Add source_matrix to info_local for return
+        self.vit._tome_info["source_matrix"] = source_matrix
+        return x, x_embed, self.vit._tome_info["size"], self.vit._tome_info
 
 
 class LatentEncoder(nn.Module):
@@ -346,11 +250,12 @@ class HybridToMeModel(nn.Module):
                  drop_path_rate=0.1,
                  num_classes=1000, 
                  dtem_window_size: int = None, 
-                 dtem_r: int = 2,
+                #  dtem_r: int = 2, 
                  dtem_t: int = 1,
                  lambda_local: float = 2.0,
                  total_merge_latent: int = 4,
                  use_softkmax: bool = False,
+                 num_local_blocks: int = 0,
                  local_block_window: int = 16,
                  pretrained=None,
                  pretrained_type: str = 'vit',
@@ -392,29 +297,22 @@ class HybridToMeModel(nn.Module):
         # self.dtem_r = dtem_r
         self.tome_use_naive_local = bool(tome_use_naive_local)
         self.use_softkmax = use_softkmax
+        self.num_local_blocks = num_local_blocks
         self.local_block_window = local_block_window
 
         # ------ Linear ------ #
         self.num_classes = num_classes
 
-        self.local = LocalEncoder(
-            self.img_size,
-            self.patch_size,
-            self.embed_dim,
-            self.num_heads,
-            self.mlp_ratio,
-            local_depth=self.local_depth,
-            drop_rate=drop_rate,
-            attn_drop_rate=attn_drop_rate,
-            drop_path_rate=drop_path_rate,
-            dtem_feat_dim=self.dtem_feat_dim,
-            dtem_window_size=self.dtem_window_size,
-            dtem_t=self.dtem_t,
-            total_merge_local=self.total_merge_local,
-            use_softkmax=self.use_softkmax,
-            swa_size=swa_size,
-            local_block_window=self.local_block_window,
-        )
+        self.local = LocalEncoder(self.img_size, self.patch_size, self.embed_dim, self.num_heads, self.mlp_ratio, 
+                                  num_classes = self.num_classes, drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate,
+                                  depth = self.local_depth, 
+                                  feat_dim = self.dtem_feat_dim, 
+                                  window_size = self.dtem_window_size,
+                                  r = self.total_merge_local // max(self.local_depth, 1), 
+                                  t = self.dtem_t,
+                                  num_local_blocks = self.num_local_blocks,
+                                  local_block_window = self.local_block_window,
+                                )
         self.latent = LatentEncoder(self.img_size, self.patch_size, self.embed_dim, self.num_heads, self.mlp_ratio,
                                     depth = self.latent_depth, drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate,
                                     source_tracking_mode = 'map',
@@ -523,10 +421,15 @@ class HybridToMeModel(nn.Module):
             # Don't raise, just warn - allow model to continue without pretrained weights
 
     def _apply_patches(self, dtem_feat_dim, dtem_window_size, dtem_t, total_merge_local, tome_window_size, tome_use_naive_local, total_merge_latent, use_softkmax, swa_size):
-        # LocalEncoder 内部已完成 merge 配置，仅同步关键信息
-        if hasattr(self.local, "_tome_info"):
-            self.local._tome_info["total_merge"] = total_merge_local
-            self.local._tome_info["local_depth"] = self.local.local_depth
+        # DTEM patch
+        dtem_r_per_layer = total_merge_local//max(len(self.local.vit.blocks),1)
+        # Cross attention 强制启用
+        dtem_apply_patch(self.local.vit, feat_dim=dtem_feat_dim, trace_source=True, prop_attn=True,
+                         default_r=dtem_r_per_layer, window_size=dtem_window_size, t=dtem_t, use_softkmax=use_softkmax, swa_size=swa_size)
+        
+        # 记录总merge数，供 parse_r 使用
+        self.local.vit._tome_info["total_merge"] = total_merge_local
+        self.local.vit._tome_info["local_depth"] = len(self.local.vit.blocks)
         
         if self.latent is not None and len(self.latent.vit.blocks) > 0:
             tome_r_per_layer = total_merge_latent//max(len(self.latent.vit.blocks),1)
@@ -812,12 +715,12 @@ if __name__ == '__main__':
         img_size=224,
         patch_size=8,
         dtem_window_size=7,
-        # dtem_r=2,
+        dtem_r=2,
         dtem_t=1,
         lambda_local=4.0,
         total_merge_latent=0,
         use_softkmax=False,
-        local_depth=4,
+        num_local_blocks=0,
         local_block_window=32,
         tome_window_size=32,
         tome_use_naive_local=False,

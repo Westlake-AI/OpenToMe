@@ -53,7 +53,7 @@ config = MergeNetConfig(
     vocab_size=320,           # 256 bytes + offset
     hidden_size=768,          # Model dimension
     num_local_layers=4,       # LoT layers (no DTEM)
-    num_encoder_layers=4,     # LoE DTEM layers (local_depth)
+    local_depth=4,     # LoE DTEM layers
     num_latent_layers=8,      # LaM layers
     num_heads=12,
     lambda_local=4.0,         # Compression ratio
@@ -159,7 +159,7 @@ For each new byte:
 
 ### Source Matrix Tracking
 - Shape: (B, N, width) where width = 2 × window_size × local_depth + 1
-- `local_depth` = `num_encoder_layers` (number of DTEM blocks in LoE)
+- `local_depth` (number of DTEM blocks in LoE)
 - Sparse band matrix storing byte-to-token provenance
 - Used for Perceiver bias: `log(source_matrix)`
 

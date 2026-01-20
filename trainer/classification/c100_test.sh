@@ -7,10 +7,10 @@ export HF_ENDPOINT=https://hf-mirror.com
 
 DATA_DIR=/liziqing/lisiyuan/jx/.cache/cifar100
 OUTPUT_DIR=./work_dirs/classification
-EXP_NAME=cifar100_mergenet_small_swa256_detem32_lr5e4_lr_local_5e4_load_pt_deit_s_full
+EXP_NAME=cifar100_mergenet_small_ori_$(date +%Y%m%d_%H%M%S)
 
 
-CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node 2 "${SCRIPT_DIR}/in1k_trainer.py" \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 TORCH_DISTRIBUTED_DEBUG=DETAIL torchrun --standalone --nproc_per_node 8 "${SCRIPT_DIR}/in1k_trainer.py" \
   --data_dir ${DATA_DIR} \
   --dataset CIFAR100 \
   --train_split train \
@@ -26,16 +26,13 @@ CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node 2 "${SCRIPT_DIR}
   --total_merge_latent 0 \
   --use_softkmax \
   --swa_size 256 \
-  --batch_size 50 \
+  --batch_size 64 \
   --epochs 200 \
   --lr 5e-4 \
   --lr_local 5e-4 \
   --weight_decay 0.05 \
   --dtem_window_size 32 \
   --sched cosine \
-  --pretrained \
-  --load_full_pretrained \
-  --pretrained_type deit \
   --warmup_epochs 20 \
   --mixup 0.8 \
   --cutmix 1.0 \
@@ -45,4 +42,4 @@ CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node 2 "${SCRIPT_DIR}
   --amp \
   --output ${OUTPUT_DIR} \
   --experiment ${EXP_NAME} \
-  --seed 42 \
+  --seed 42

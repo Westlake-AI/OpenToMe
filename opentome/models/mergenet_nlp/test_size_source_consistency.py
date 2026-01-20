@@ -14,7 +14,7 @@ def test_size_source_consistency():
         vocab_size=320,
         hidden_size=384,
         num_local_layers=4,
-        num_encoder_layers=4,
+        local_depth=4,
         num_latent_layers=8,
         num_heads=6,
         num_kv_heads=6,

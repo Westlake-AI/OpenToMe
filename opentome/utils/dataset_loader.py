@@ -8,7 +8,7 @@ import os
 import torchvision
 import torchvision.transforms as transforms
 from torchvision.transforms.functional import InterpolationMode
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torchvision.datasets import CIFAR10, CIFAR100
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, create_dataset, create_loader, AugMixDataset
 
@@ -100,6 +100,12 @@ def build_dataset(args, data_config, collate_fn, num_aug_splits):
             dataset_train = AugMixDataset(dataset_train, num_splits=num_aug_splits)
     else:
         raise ValueError(f"Do not support the dataset of {args.dataset.lower()}")
+
+    # optional debug subset for sanity checks
+    if args.debug_subset and args.debug_subset > 0:
+        subset_size = int(args.debug_subset)
+        dataset_train = Subset(dataset_train, list(range(min(subset_size, len(dataset_train)))))
+        dataset_eval = Subset(dataset_eval, list(range(min(subset_size, len(dataset_eval)))))
 
     # create data loaders w/ augmentation pipeiine
     train_interpolation = args.train_interpolation

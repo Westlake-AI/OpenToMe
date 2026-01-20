@@ -24,7 +24,6 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node=2 /liziqing/yuha
   --dtem_feat_dim 64 \
   --lambda_local 4.0 \
   --total_merge_latent 8 \
-  --num_local_blocks 1 \
   --local_block_window 32 \
   --batch_size 512 \
   --epochs 300 \

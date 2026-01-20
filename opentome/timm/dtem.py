@@ -198,7 +198,8 @@ class DTEMAttention(Attention):
                 if FLASH_ATTN_AVAILABLE and size is not None:
                     try:
                         # 处理 bias：size 可能是 (B, N) 或 (B, N, 1)
-                        size_log = size.squeeze(-1).log() if size.ndim == 3 else size.log()
+                        size_log = size.squeeze(-1) if size.ndim == 3 else size
+                        size_log = size_log.clamp_min(1e-6).log()
                         
                         # 调用 flash attention (自动处理格式)
                         # q,k,v: (B, H, N, D)，biased_local_attention 会自动检测并处理
@@ -409,7 +410,8 @@ class DTEMBlock(Block):
     def _merge_train(self, x, size, r, n, metric, source_matrix=None):
 
         metric = metric['metric']
-        metric = metric / metric.norm(dim=-1, keepdim=True)
+        norm = metric.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        metric = metric / norm
 
         r = min(r, (n - 1) // 2)
         if r <= 0:
@@ -756,7 +758,8 @@ class DTEMBlock(Block):
 
     def _merge_eval(self, x, size, r, metric, source_matrix=None):    # eval：保留 ToMe 行为。弃用。
         metric = metric['metric']
-        metric = metric / metric.norm(dim=-1, keepdim=True)
+        norm = metric.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+        metric = metric / norm
 
         merge, _, current_level_map = bipartite_soft_matching(metric,
                                            r,
