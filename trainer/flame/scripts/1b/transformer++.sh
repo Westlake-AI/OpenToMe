@@ -15,7 +15,7 @@ NNODE=1 NGPU=8 LOG_RANK=0 bash train.sh \
   --optimizer.lr 1e-3 \
   --lr_scheduler.decay_type cosine \
   --lr_scheduler.warmup_steps 477 \
-  --lr_scheduler.lr_min 0.075 \
+  --lr_scheduler.lr_min 0.1 \
   --training.batch_size 1 \
   --training.seq_len 32768 \
   --training.context_len 4096 \

@@ -323,51 +323,6 @@ class BltTokenizer(Tokenizer):
                 byte_vals.append(val)
         return bytes(byte_vals).decode("utf-8", errors="ignore")
     
-    # def decode(
-    #     self,
-    #     token_ids,
-    #     skip_special_tokens: bool = True,
-    # ):
-    #     # ---- HF compatibility ----
-
-    #     # 1) single token
-    #     if isinstance(token_ids, int):
-    #         token_ids = [token_ids]
-
-    #     # 2) batch passed mistakenly
-    #     if (
-    #         isinstance(token_ids, (list, tuple))
-    #         and len(token_ids) > 0
-    #         and isinstance(token_ids[0], (list, tuple))
-    #     ):
-    #         return self.batch_decode(
-    #             token_ids, skip_special_tokens=skip_special_tokens
-    #         )
-
-    #     # 3) normal path
-    #     if not isinstance(token_ids, (list, tuple)):
-    #         raise TypeError(
-    #             f"decode expects int or List[int], got {type(token_ids)}"
-    #         )
-
-    #     return self._decode_single(
-    #         token_ids, skip_special_tokens=skip_special_tokens
-    #     )
-
-    # def batch_decode(
-    #     self,
-    #     sequences,
-    #     skip_special_tokens: bool = True,
-    # ):
-    #     if not isinstance(sequences, (list, tuple)):
-    #         raise TypeError("batch_decode expects a list of token sequences")
-
-    #     return [
-    #         self._decode_single(seq, skip_special_tokens=skip_special_tokens)
-    #         for seq in sequences
-    #     ]
-
-
     def decode(self, token_ids, skip_special_tokens: bool = True):
         # tensor -> list
         if isinstance(token_ids, torch.Tensor):

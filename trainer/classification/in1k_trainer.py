@@ -162,6 +162,8 @@ parser.add_argument("--load_full_pretrained", action='store_true', default=False
                     help='Load full pretrained weights (Local + Latent encoders). If not set, only load Local Encoder weights.')
 parser.add_argument("--load_only_local", action='store_true', default=False,
                     help='Only load Local Encoder pretrained weights (equivalent to not using --load_full_pretrained).')
+parser.add_argument("--freeze_local_encoder", action='store_true', default=False,
+                    help='Freeze Local Encoder parameters for SFT (Supervised Fine-Tuning) latent encoder only.')
 
 # ToMe parameters
 parser.add_argument("--tome_window_size", type=int, default=None,
@@ -455,6 +457,7 @@ def main():
             'swa_size': args.swa_size,
             'pretrained_type': args.pretrained_type,
             'load_full_pretrained': load_full_pretrained,
+            'freeze_local_encoder': args.freeze_local_encoder,
         })
         if USE_OLD_MERGENET:
             model_kwargs['num_local_blocks'] = args.num_local_blocks

@@ -355,6 +355,7 @@ class HybridToMeModel(nn.Module):
                  pretrained=None,
                  pretrained_type: str = 'vit',
                  load_full_pretrained: bool = True,
+                 freeze_local_encoder: bool = False,
                  swa_size: int = None,
                  **kwargs):
         super().__init__()
@@ -443,6 +444,10 @@ class HybridToMeModel(nn.Module):
         if pretrained:
             self._load_full_pretrained_weights(pretrained, img_size, pretrained_type, load_full_pretrained)
 
+            # Freeze local encoder if requested (for SFT latent encoder only)
+        if freeze_local_encoder:
+            self.freeze_local_encoder()
+
     def _load_full_pretrained_weights(self, pretrained, img_size, pretrained_type='vit', load_full=True):
         """
         Load pretrained weights from timm ViT/DeiT model.
@@ -521,6 +526,47 @@ class HybridToMeModel(nn.Module):
             print(f"[HybridToMeModel] Exception traceback:")
             traceback.print_exc()
             # Don't raise, just warn - allow model to continue without pretrained weights
+
+    def freeze_local_encoder(self):
+        """
+        Freeze all parameters in the local encoder (including local_blocks if exists).
+        This is useful for SFT (Supervised Fine-Tuning) where only the latent encoder is trained.
+        """
+        print("[HybridToMeModel] Freezing Local Encoder parameters...")
+        frozen_params = 0
+        total_params = 0
+        
+        # Freeze local encoder (including local_blocks)
+        for name, param in self.local.named_parameters():
+            param.requires_grad = False
+            frozen_params += param.numel()
+            total_params += param.numel()
+        
+        print(f"[HybridToMeModel] Frozen {frozen_params:,} parameters in Local Encoder")
+        print(f"[HybridToMeModel] Total Local Encoder parameters: {total_params:,}")
+        
+        # Print trainable parameters summary
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total_model_params = sum(p.numel() for p in self.parameters())
+        print(f"[HybridToMeModel] Model trainable parameters: {trainable_params:,} / {total_model_params:,}")
+    
+    def unfreeze_local_encoder(self):
+        """
+        Unfreeze all parameters in the local encoder.
+        """
+        print("[HybridToMeModel] Unfreezing Local Encoder parameters...")
+        unfrozen_params = 0
+        
+        for name, param in self.local.named_parameters():
+            param.requires_grad = True
+            unfrozen_params += param.numel()
+        
+        print(f"[HybridToMeModel] Unfrozen {unfrozen_params:,} parameters in Local Encoder")
+        
+        # Print trainable parameters summary
+        trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        total_model_params = sum(p.numel() for p in self.parameters())
+        print(f"[HybridToMeModel] Model trainable parameters: {trainable_params:,} / {total_model_params:,}")
 
     def _apply_patches(self, dtem_feat_dim, dtem_window_size, dtem_t, total_merge_local, tome_window_size, tome_use_naive_local, total_merge_latent, use_softkmax, swa_size):
         # LocalEncoder 内部已完成 merge 配置，仅同步关键信息
@@ -822,6 +868,7 @@ if __name__ == '__main__':
         tome_window_size=32,
         tome_use_naive_local=False,
         swa_size=None,
+        freeze_local_encoder=False,  # Keep local encoder trainable
     )
     # Set model to eval mode for inference
     model.eval()
