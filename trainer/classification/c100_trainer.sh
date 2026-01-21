@@ -7,10 +7,10 @@ export HF_ENDPOINT=https://hf-mirror.com
 
 DATA_DIR=/liziqing/lisiyuan/jx/.cache/cifar100
 OUTPUT_DIR=./work_dirs/classification
-EXP_NAME=cifar100_mergenet_small_swa256_detem32_lr5e4_lr_local_5e4_load_pt_deit_s_full
+EXP_NAME=cifar100_mergenet_small_swa256_detem32_lr5e4_load_pt_deit_s_full
 
 
-CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node 2 "${SCRIPT_DIR}/in1k_trainer.py" \
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node 2 "${SCRIPT_DIR}/in1k_trainer.py" \
   --data_dir ${DATA_DIR} \
   --dataset CIFAR100 \
   --train_split train \

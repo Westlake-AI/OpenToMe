@@ -136,8 +136,6 @@ parser.add_argument('-b', '--batch_size', type=int, default=128, metavar='N',
                     help='input batch size for training (default: 128)')
 parser.add_argument('-vb', '--validation-batch-size', type=int, default=None, metavar='N',
                     help='validation batch size override (default: None)')
-parser.add_argument('--debug_subset', type=int, default=0, metavar='N',
-                    help='Use only a subset of the dataset for debugging (default: 0, use full dataset)')
 
 # DETM parameters
 parser.add_argument("--dtem_window_size", type=int, default=None, 
