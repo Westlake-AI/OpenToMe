@@ -2,6 +2,7 @@
 import re
 import json
 import os
+import torch
 
 from .abstract_tokenizer import Tokenizer
 from .constants import (
@@ -105,6 +106,8 @@ class BltTokenizer(Tokenizer):
         self.vocab_size_unit_1 = vocab_size_unit_1
         self.n_words = vocab_size_unit_1 + self.offsetting_special_char
 
+        self.padding_side = "right"
+
         # ---- HF-compatible aliases ----
         self.bos_token_id = self.bos_id
         self.eos_token_id = self.eos_id
@@ -121,44 +124,100 @@ class BltTokenizer(Tokenizer):
         self.unk_token_id = None
 
 
+    # def __call__(
+    #     self,
+    #     text,
+    #     return_attention_mask: bool = False,
+    #     add_bos: bool | None = None,
+    #     add_eos: bool | None = None,
+    # ):
+    #     """
+    #     HF-compatible tokenizer interface.
+    #     """
+
+    #     # ---- normalize to batch ----
+    #     if isinstance(text, str):
+    #         texts = [text]
+    #     elif isinstance(text, list):
+    #         if not all(isinstance(t, str) for t in text):
+    #             raise TypeError("All elements in text list must be str")
+    #         texts = text
+    #     else:
+    #         raise TypeError(
+    #             f"BltTokenizer.__call__ expects str or List[str], got {type(text)}"
+    #         )
+
+    #     # ---- tokenize ----
+    #     input_ids = [
+    #         self.encode(t, add_bos=add_bos, add_eos=add_eos)
+    #         for t in texts
+    #     ]
+
+    #     output = {"input_ids": input_ids}
+
+    #     # ---- attention mask (optional) ----
+    #     if return_attention_mask:
+    #         output["attention_mask"] = [
+    #             [1] * len(ids) for ids in input_ids
+    #         ]
+
+    #     return output
+
     def __call__(
         self,
         text,
-        return_attention_mask: bool = False,
+        padding=False,
+        truncation=False,
+        return_tensors=None,
+        return_attention_mask=True,
         add_bos: bool | None = None,
         add_eos: bool | None = None,
     ):
-        """
-        HF-compatible tokenizer interface.
-        """
-
-        # ---- normalize to batch ----
+        # normalize batch
         if isinstance(text, str):
             texts = [text]
-        elif isinstance(text, list):
-            if not all(isinstance(t, str) for t in text):
-                raise TypeError("All elements in text list must be str")
-            texts = text
         else:
-            raise TypeError(
-                f"BltTokenizer.__call__ expects str or List[str], got {type(text)}"
-            )
+            texts = text
 
-        # ---- tokenize ----
-        input_ids = [
+        batch_ids = [
             self.encode(t, add_bos=add_bos, add_eos=add_eos)
             for t in texts
         ]
 
-        output = {"input_ids": input_ids}
+        # ---- padding ----
+        if padding:
+            max_len = max(len(x) for x in batch_ids)
 
-        # ---- attention mask (optional) ----
+            if self.padding_side == "right":
+                batch_ids = [
+                    x + [self.pad_token_id] * (max_len - len(x))
+                    for x in batch_ids
+                ]
+            else:
+                batch_ids = [
+                    [self.pad_token_id] * (max_len - len(x)) + x
+                    for x in batch_ids
+                ]
+
+        # ---- attention mask ----
         if return_attention_mask:
-            output["attention_mask"] = [
-                [1] * len(ids) for ids in input_ids
+            attn = [
+                [1 if t != self.pad_token_id else 0 for t in seq]
+                for seq in batch_ids
             ]
 
-        return output
+        out = {"input_ids": batch_ids}
+        if return_attention_mask:
+            out["attention_mask"] = attn
+
+        # ---- tensor ----
+        if return_tensors == "pt":
+            out = {
+                k: torch.tensor(v, dtype=torch.long)
+                for k, v in out.items()
+            }
+
+        return out
 
     def get_vocab_size(self) -> int:
         return self.n_words
@@ -264,18 +323,61 @@ class BltTokenizer(Tokenizer):
                 byte_vals.append(val)
         return bytes(byte_vals).decode("utf-8", errors="ignore")
     
-    def decode(
-        self,
-        token_ids,
-        skip_special_tokens: bool = True,
-    ):
-        # ---- HF compatibility ----
+    # def decode(
+    #     self,
+    #     token_ids,
+    #     skip_special_tokens: bool = True,
+    # ):
+    #     # ---- HF compatibility ----
 
-        # 1) single token
+    #     # 1) single token
+    #     if isinstance(token_ids, int):
+    #         token_ids = [token_ids]
+
+    #     # 2) batch passed mistakenly
+    #     if (
+    #         isinstance(token_ids, (list, tuple))
+    #         and len(token_ids) > 0
+    #         and isinstance(token_ids[0], (list, tuple))
+    #     ):
+    #         return self.batch_decode(
+    #             token_ids, skip_special_tokens=skip_special_tokens
+    #         )
+
+    #     # 3) normal path
+    #     if not isinstance(token_ids, (list, tuple)):
+    #         raise TypeError(
+    #             f"decode expects int or List[int], got {type(token_ids)}"
+    #         )
+
+    #     return self._decode_single(
+    #         token_ids, skip_special_tokens=skip_special_tokens
+    #     )
+
+    # def batch_decode(
+    #     self,
+    #     sequences,
+    #     skip_special_tokens: bool = True,
+    # ):
+    #     if not isinstance(sequences, (list, tuple)):
+    #         raise TypeError("batch_decode expects a list of token sequences")
+
+    #     return [
+    #         self._decode_single(seq, skip_special_tokens=skip_special_tokens)
+    #         for seq in sequences
+    #     ]
+
+
+    def decode(self, token_ids, skip_special_tokens: bool = True):
+        # tensor -> list
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.tolist()
+
+        # single id
         if isinstance(token_ids, int):
             token_ids = [token_ids]
 
-        # 2) batch passed mistakenly
+        # batch passed
         if (
             isinstance(token_ids, (list, tuple))
             and len(token_ids) > 0
@@ -285,7 +387,6 @@ class BltTokenizer(Tokenizer):
                 token_ids, skip_special_tokens=skip_special_tokens
             )
 
-        # 3) normal path
         if not isinstance(token_ids, (list, tuple)):
             raise TypeError(
                 f"decode expects int or List[int], got {type(token_ids)}"
@@ -295,18 +396,28 @@ class BltTokenizer(Tokenizer):
             token_ids, skip_special_tokens=skip_special_tokens
         )
 
+
     def batch_decode(
         self,
         sequences,
         skip_special_tokens: bool = True,
     ):
+        # ---- HF compatibility ----
+
+        # tensor -> list
+        if isinstance(sequences, torch.Tensor):
+            sequences = sequences.tolist()
+
         if not isinstance(sequences, (list, tuple)):
-            raise TypeError("batch_decode expects a list of token sequences")
+            raise TypeError(
+                f"batch_decode expects Tensor or List[List[int]], got {type(sequences)}"
+            )
 
         return [
             self._decode_single(seq, skip_special_tokens=skip_special_tokens)
             for seq in sequences
         ]
+
 
     def get_token_offsets(self, text: str, tokens: list[int] | None = None):
         # TODO: Figure out what this does

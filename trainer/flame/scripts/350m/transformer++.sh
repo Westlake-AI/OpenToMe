@@ -1,13 +1,12 @@
 #!/usr/bin/bash
 
 export HF_ENDPOINT=https://hf-mirror.com
-
 export BACKBONE=transformer++_340M
 echo $BACKBONE
 
-NNODE=1 NGPU=8 LOG_RANK=0 bash train.sh \
+NNODE=1 NGPU=4 LOG_RANK=0 bash train.sh \
   --job.config_file flame/models/fla.toml \
-  --job.dump_folder exp/transformer/batch1.seqlen32768.grad_acc2.warmup1024.update1.steps30720.8gpus.lr1e-4 \
+  --job.dump_folder exp/transformer/batch1.seqlen65536.grad_acc2.warmup1024.update1.steps30720.4gpus.lr1e-4 \
   --model.config configs/transformer_340M.json \
   --model.tokenizer_path /yuchang/lsy_jx/.cache/models/transformer-1.3B-100B \
   --optimizer.name AdamW \
@@ -17,7 +16,7 @@ NNODE=1 NGPU=8 LOG_RANK=0 bash train.sh \
   --lr_scheduler.lr_min 0.1 \
   --lr_scheduler.decay_type cosine \
   --training.batch_size 1 \
-  --training.seq_len 32768 \
+  --training.seq_len 65536\
   --training.context_len 4096 \
   --training.varlen \
   --training.gradient_accumulation_steps 2 \
