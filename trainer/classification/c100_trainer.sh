@@ -24,18 +24,19 @@ CUDA_VISIBLE_DEVICES=2,3 torchrun --standalone --nproc_per_node 2 "${SCRIPT_DIR}
   --dtem_feat_dim 64 \
   --lambda_local 4.0 \
   --total_merge_latent 0 \
+  --num_local_blocks 1 \
   --use_softkmax \
   --swa_size 256 \
   --batch_size 50 \
   --epochs 200 \
   --lr 5e-4 \
-  --lr_local 5e-4 \
   --weight_decay 0.05 \
   --dtem_window_size 32 \
   --sched cosine \
   --pretrained \
   --load_full_pretrained \
   --pretrained_type deit \
+  --freeze_local_encoder \
   --warmup_epochs 20 \
   --mixup 0.8 \
   --cutmix 1.0 \

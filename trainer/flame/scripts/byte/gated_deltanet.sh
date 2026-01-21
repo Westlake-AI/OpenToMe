@@ -1,17 +1,17 @@
 #!/usr/bin/bash
 
 export HF_ENDPOINT=https://hf-mirror.com
-export HF_DATASETS_CACHE=/ssdwork/lisiyuan/huggingface
+export HUGGINGFACE_HUB_CACHE=/ssdwork/lisiyuan/huggingface/
 export BACKBONE=gated_deltanet_340M
 export TOKENIZER_NAME=blt
 echo $BACKBONE
 echo $TOKENIZER_NAME
 
-NNODE=1 NGPU=4 LOG_RANK=0 bash train.sh \
+CUDA_VISIBLE_DEVICES=4,5,6,7 NNODE=1 NGPU=4 LOG_RANK=0 bash train.sh \
   --job.config_file flame/models/fla.toml \
-  --job.dump_folder exp/byte/gated_deltanet_340M-10B/batch1.seqlen65536.grad_acc2.warmup1024.update1.steps30720.8gpus.lr4e-4 \
+  --job.dump_folder exp/byte/gated_deltanet_340M-10B/batch1.seqlen32768.grad_acc4.warmup1024.update1.steps30720.4gpus.lr4e-4 \
   --model.config configs/gated_deltanet_340M.json \
-  --model.tokenizer_path /liziqing/lisiyuan/jx/.cache/transformer-1.3B-100B \
+  --model.tokenizer_path /masiqi/lisiyuan/jx/.cache/transformer-1.3B-100B \
   --optimizer.name AdamW \
   --optimizer.eps 1e-15 \
   --optimizer.lr 4e-4 \
@@ -19,10 +19,10 @@ NNODE=1 NGPU=4 LOG_RANK=0 bash train.sh \
   --lr_scheduler.lr_min 0.075 \
   --lr_scheduler.decay_type cosine \
   --training.batch_size 1 \
-  --training.seq_len 65536 \
+  --training.seq_len 32768 \
   --training.context_len 4096 \
   --training.varlen \
-  --training.gradient_accumulation_steps 2 \
+  --training.gradient_accumulation_steps 4 \
   --training.steps 30720 \
   --training.max_norm 1.0 \
   --training.skip_nan_inf \
