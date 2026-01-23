@@ -7,12 +7,12 @@ echo $BACKBONE
 
 NNODE=1 NGPU=8 LOG_RANK=0 bash train.sh \
   --job.config_file flame/models/fla.toml \
-  --job.dump_folder exp/transformer/batch1.seqlen32768.grad_acc8.warmup477.update1.steps47684.lr1e-3 \
+  --job.dump_folder exp/transformer/batch1.seqlen32768.grad_acc8.warmup477.update1.steps47684.lr3e-4 \
   --model.config configs/transformer_1B.json \
   --model.tokenizer_path /yuchang/lsy_jx/.cache/models/transformer-1.3B-100B \
   --optimizer.name AdamW \
   --optimizer.eps 1e-15 \
-  --optimizer.lr 1e-3 \
+  --optimizer.lr 3e-4 \
   --lr_scheduler.decay_type cosine \
   --lr_scheduler.warmup_steps 477 \
   --lr_scheduler.lr_min 0.1 \
