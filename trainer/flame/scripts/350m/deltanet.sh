@@ -9,7 +9,7 @@ NNODE=1 NGPU=4 LOG_RANK=0 bash train.sh \
   --job.config_file flame/models/fla.toml \
   --job.dump_folder exp/delta_net_340M_10B/batch1.seqlen32768.grad_acc4.warmup1024.update1.steps30720.4gpus.lr3e-4 \
   --model.config configs/delta_net_340M.json \
-  --model.tokenizer_path /masiqi/lisiyuan/jx/.cache/delta_net-1.3B-100B \
+  --model.tokenizer_path /masiqi/lisiyuan/jx/.cache/transformer-1.3B-100B \
   --optimizer.name AdamW \
   --optimizer.eps 1e-15 \
   --optimizer.lr 3e-4 \

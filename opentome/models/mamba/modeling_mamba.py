@@ -24,15 +24,15 @@ from transformers.utils import ModelOutput, logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.mamba import Mamba
-from fla.models.mamba.configuration_mamba import MambaConfig
-from fla.models.utils import FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules.l2warp import l2_warp
+from opentome.models.mamba.configuration_mamba import MambaConfig
+from opentome.models.utils import FLAGenerationMixin
 
 try:
     from transformers.modeling_layers import GradientCheckpointingLayer
 except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
+    from opentome.models.modeling_layers import GradientCheckpointingLayer
 
 logger = logging.get_logger(__name__)
 

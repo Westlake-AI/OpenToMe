@@ -14,11 +14,11 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
 from fla.layers.gla import GatedLinearAttention
-from fla.models.gla.configuration_gla import GLAConfig
-from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as GLAMLP
 from fla.modules.l2warp import l2_warp
+from opentome.models.gla.configuration_gla import GLAConfig
+from opentome.models.utils import Cache, FLAGenerationMixin
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 try:
     from transformers.modeling_layers import GradientCheckpointingLayer
 except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
+    from opentome.models.modeling_layers import GradientCheckpointingLayer
 
 logger = logging.get_logger(__name__)
 

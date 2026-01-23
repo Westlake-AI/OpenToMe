@@ -22,10 +22,10 @@ from transformers.utils import ModelOutput, logging
 from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.mamba2 import Mamba2
-from fla.models.mamba2.configuration_mamba2 import Mamba2Config
-from fla.models.utils import FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules.l2warp import l2_warp
+from opentome.models.mamba2.configuration_mamba2 import Mamba2Config
+from opentome.models.utils import FLAGenerationMixin
 
 try:
     from torch.distributed.tensor import DTensor
@@ -35,7 +35,7 @@ except (ImportError, AttributeError):
 try:
     from transformers.modeling_layers import GradientCheckpointingLayer
 except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
+    from opentome.models.modeling_layers import GradientCheckpointingLayer
 
 
 logger = logging.get_logger(__name__)

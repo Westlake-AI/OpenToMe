@@ -14,11 +14,11 @@ from transformers.utils.deprecation import deprecate_kwarg
 
 from fla.layers.attn import Attention
 from fla.layers.gated_deltanet import GatedDeltaNet
-from fla.models.gated_deltanet.configuration_gated_deltanet import GatedDeltaNetConfig
-from fla.models.utils import Cache, FLAGenerationMixin
 from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss, RMSNorm
 from fla.modules import GatedMLP as GatedDeltaNetMLP
 from fla.modules.l2warp import l2_warp
+from opentome.models.gated_deltanet.configuration_gated_deltanet import GatedDeltaNetConfig
+from opentome.models.utils import Cache, FLAGenerationMixin
 
 if TYPE_CHECKING:
     from transformers.processing_utils import Unpack
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 try:
     from transformers.modeling_layers import GradientCheckpointingLayer
 except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
+    from opentome.models.modeling_layers import GradientCheckpointingLayer
 
 logger = logging.get_logger(__name__)
 
