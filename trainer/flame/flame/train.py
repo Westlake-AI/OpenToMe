@@ -45,6 +45,12 @@ elif "gla" in backbone:
 elif "transformer++" in backbone:
     print("Transformer++")
     import opentome.models.transformer
+elif "mamba" in backbone:
+    print("Mamba")
+    import opentome.models.mamba
+elif "mamba2" in backbone:
+    print("Mamba2")
+    import opentome.models.mamba2
 elif "qwen3_next" in backbone:
     print("Qwen3-NeXt")
     import opentome.models.qwen3_next

@@ -44,7 +44,7 @@ from lm_eval.models.utils import (
 )
 
 # ------ jinxin added ------ #
-backbone = os.environ.get("BACKBONE", None)
+backbone = os.environ.get("BACKBONE", "None")
 print("*" * 50)
 if "gated_deltanet" in backbone:
     print("Gated-DeltaNet")
@@ -58,9 +58,20 @@ elif "gla" in backbone:
 elif "transformer++" in backbone:
     print("Transformer++")
     import opentome.models.transformer
+elif "mamba" in backbone:
+    print("Mamba")
+    import opentome.models.mamba
+elif "mamba2" in backbone:
+    print("Mamba2")
+    import opentome.models.mamba2
+elif "qwen3_next" in backbone:
+    print("Qwen3-NeXt")
+    import opentome.models.qwen3_next
+elif "blt" in backbone:
+    print("BLT")
+    import opentome.models.blt
 else:
     print("None")
-print("*" * 50)
 tokenizer_name = os.environ.get("TOKENIZER_NAME", "default")
 print(f"Tokenizer name: {tokenizer_name}")
 print("*" * 50)
