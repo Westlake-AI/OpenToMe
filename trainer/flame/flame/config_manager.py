@@ -496,6 +496,12 @@ class JobConfig:
             action="store_true",
             help="Whether to log metrics to Weights & Biases",
         )
+        self.parser.add_argument(
+            "--no-metrics.enable_wandb",
+            dest="metrics.enable_wandb",
+            action="store_false",
+            help="Disable Weights & Biases logging (e.g. to avoid disk quota on ~/.cache/wandb)",
+        )
 
         self.parser.add_argument(
             "--experimental.enable_async_tensor_parallel",

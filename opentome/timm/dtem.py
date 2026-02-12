@@ -193,38 +193,40 @@ class DTEMAttention(Attention):
             if window_size is None:
                 window_size = self._tome_info.get("window_size")
             if window_size is not None and window_size > 0:
-                # 尝试使用 triton 实现；失败回退到 naive/flash
-                x_bnc = None
-                if FLASH_ATTN_AVAILABLE and size is not None:
-                    try:
-                        # 处理 bias：size 可能是 (B, N) 或 (B, N, 1)
-                        size_log = size.squeeze(-1) if size.ndim == 3 else size
-                        size_log = size_log.clamp_min(1e-6).log()
-                        
-                        # 调用 flash attention (自动处理格式)
-                        # q,k,v: (B, H, N, D)，biased_local_attention 会自动检测并处理
-                        x_out = biased_local_attention(
-                            q, k, v, 
-                            bias=size_log,
-                            local_window=window_size,
-                            dropout_p=self.attn_drop.p,
-                            training=self.training,
-                            x_dtype=x.dtype
-                        )  # 返回格式与输入一致: (B, H, N, D)
-                        
-                        # 转换为 (B, N, C): (B, H, N, D) -> (B, N, H, D) -> (B, N, H*D)
-                        x_bnc = x_out.transpose(1, 2).reshape(B, N, self.num_heads * self.head_dim)
-                        # print(f"✅ Using Flash Attention with local window")
-                    except Exception as e_flash:
-                        # Flash attention 失败，x_bnc 保持 None
-                        import warnings
-                        import traceback
-                        warnings.warn(f"⚠️ Flash Attention failed: {e_flash}\nTraceback: {traceback.format_exc()}. Falling back to naive implementation.", stacklevel=2)
+                # 仅支持 flash-attn，本地窗口失败时直接报错
+                if not FLASH_ATTN_AVAILABLE:
+                    raise RuntimeError(
+                        "DTEM local attention requires flash-attn. "
+                        "Please install flash-attn or set dtem_window_size=None."
+                    )
+                if size is None:
+                    raise RuntimeError(
+                        "DTEM local attention requires size for bias. "
+                        "Got size=None while local window is enabled."
+                    )
+                try:
+                    # 处理 bias：size 可能是 (B, N) 或 (B, N, 1)
+                    size_log = size.squeeze(-1) if size.ndim == 3 else size
+                    size_log = size_log.clamp_min(1e-6).log()
                     
-                    if x_bnc is None:
-                        import warnings
-                        warnings.warn(f"⚠️ Using naive local attention (SLOW & HIGH MEMORY!). FLASH_ATTN_AVAILABLE={FLASH_ATTN_AVAILABLE}", stacklevel=2)
-                        x_bnc = self._naive_local_attention(q, k, v, size, window_size, x_dtype=x.dtype)
+                    # 调用 flash attention (自动处理格式)
+                    # q,k,v: (B, H, N, D)，biased_local_attention 会自动检测并处理
+                    x_out = biased_local_attention(
+                        q, k, v, 
+                        bias=size_log,
+                        local_window=window_size,
+                        dropout_p=self.attn_drop.p,
+                        training=self.training,
+                        x_dtype=x.dtype
+                    )  # 返回格式与输入一致: (B, H, N, D)
+                    
+                    # 转换为 (B, N, C): (B, H, N, D) -> (B, N, H, D) -> (B, N, H*D)
+                    x_bnc = x_out.transpose(1, 2).reshape(B, N, self.num_heads * self.head_dim)
+                except Exception as e_flash:
+                    raise RuntimeError(
+                        "DTEM local attention failed in flash-attn path. "
+                        "Please verify flash-attn installation and inputs."
+                    ) from e_flash
             else:
                 # 全局注意力路径
                 attn = q @ k.transpose(-2, -1)
@@ -253,7 +255,7 @@ class DTEMAttention(Attention):
 
     def _naive_local_attention(self, q, k, v, size, window_size, x_dtype=torch.float32):
         """
-        无依赖的局部窗口注意力回退实现。
+        无依赖的局部窗口注意力参考实现（不在主路径中使用）。
         q,k,v: (B, H, N, D)
         size: (B, N, 1) or (B, N) or None
         返回: (B, N, C)

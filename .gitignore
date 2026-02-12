@@ -121,3 +121,5 @@ work_dirs
 results
 *.txt
 *.pdf
+
+trainer/flame/exp
