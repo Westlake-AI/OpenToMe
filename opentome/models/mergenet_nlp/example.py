@@ -1,5 +1,7 @@
 """Minimal examples for MergeNet NLP checks."""
 
+from pathlib import Path
+
 import torch
 from opentome.models.mergenet_nlp import MergeNetConfig, MergeNetForCausalLM
 
@@ -198,6 +200,10 @@ def sliding_window_alignment_check():
     same = torch.equal(out_full, out_sw)
     print(f"Alignment: {'PASS' if same else 'WARN: mismatch'}")
     if not same:
+        print(
+            "Note: mismatch can be expected because `full_recompute` re-runs LoE on the grown full sequence,\n"
+            "while `sliding_window` approximates future latent states autoregressively."
+        )
         mismatch = (out_full != out_sw).nonzero(as_tuple=False)
         if mismatch.numel() > 0:
             first_pos = mismatch[0, 1].item()
@@ -302,11 +308,183 @@ def gradient_flow_check():
     print()
 
 
+def visualization_check(output_dir: str | None = None):
+    """
+    Generate plots to visually validate:
+    1) LoD decoder bias shape/range for training mode.
+    2) LoD decoder bias for inference mode (single-step with queue positions).
+    3) Bias consistency between train-vs-infer for same absolute position.
+    4) Token-level alignment between full recompute and sliding-window generate.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+    except Exception as exc:
+        print("Visualization skipped: matplotlib/numpy unavailable.", exc)
+        return
+
+    print("=" * 60)
+    print("Visualization Check")
+    print("=" * 60)
+
+    model, config = create_model_example()
+    model.eval()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device.type == "cuda":
+        dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    else:
+        dtype = torch.float32
+    print(f"Using device: {device}, dtype: {dtype}")
+    model = model.to(device=device, dtype=dtype)
+
+    if output_dir is None:
+        out_path = Path(__file__).resolve().parent / "visualizations"
+    else:
+        out_path = Path(output_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
+
+    torch.manual_seed(0)
+
+    # -----------------------------------------------------------------
+    # 1) Training-time style decoder bias (full sequence positions)
+    # -----------------------------------------------------------------
+    L = 32
+    N = max(4, int(L / max(config.lambda_local, 1e-6)))
+    q_dummy = torch.zeros(1, L, config.hidden_size, device=device, dtype=dtype)
+    kv_dummy = torch.zeros(1, N, config.hidden_size, device=device, dtype=dtype)
+
+    with torch.no_grad():
+        bias_train = model.model.local_decoder.build_decoder_bias(
+            q_dummy,
+            kv_dummy,
+            byte_positions=torch.arange(L, device=device, dtype=torch.long),
+            latent_positions=torch.arange(N, device=device, dtype=torch.long),
+        )[0].float().cpu()
+
+    # -----------------------------------------------------------------
+    # 2) Inference-time style decoder bias (single-step + latent queue)
+    # -----------------------------------------------------------------
+    step_t = L - 1
+    N_queue = config.W_infer + 1
+    latent_positions_infer = torch.arange(step_t // max(int(config.lambda_local), 1) - N_queue + 1,
+                                          step_t // max(int(config.lambda_local), 1) + 1,
+                                          device=device, dtype=torch.long)
+    q_step = torch.zeros(1, 1, config.hidden_size, device=device, dtype=dtype)
+    kv_step = torch.zeros(1, N_queue, config.hidden_size, device=device, dtype=dtype)
+
+    with torch.no_grad():
+        bias_infer_step = model.model.local_decoder.build_decoder_bias(
+            q_step,
+            kv_step,
+            byte_positions=torch.tensor([step_t], device=device, dtype=torch.long),
+            latent_positions=latent_positions_infer,
+        )[0, 0].float().cpu()
+
+        # For direct comparability, reuse same latent positions and broadcast to all t.
+        kv_for_compare = torch.zeros(1, N_queue, config.hidden_size, device=device, dtype=dtype)
+        bias_compare = model.model.local_decoder.build_decoder_bias(
+            q_dummy,
+            kv_for_compare,
+            byte_positions=torch.arange(L, device=device, dtype=torch.long),
+            latent_positions=latent_positions_infer,
+        )[0].float().cpu()
+
+    # -----------------------------------------------------------------
+    # 3) Full vs Sliding generation alignment trace
+    # -----------------------------------------------------------------
+    prompt_len = 12
+    gen_extra = 24
+    input_ids = torch.randint(0, config.vocab_size, (1, prompt_len), device=device)
+    with torch.no_grad():
+        out_full = model.generate(
+            input_ids=input_ids,
+            max_length=prompt_len + gen_extra,
+            temperature=1.0,
+            top_p=1.0,
+            top_k=1,
+            use_sliding_window=False,
+        )
+        out_sw = model.generate(
+            input_ids=input_ids,
+            max_length=prompt_len + gen_extra,
+            temperature=1.0,
+            top_p=1.0,
+            top_k=1,
+            use_sliding_window=True,
+        )
+    out_full_cpu = out_full[0].detach().cpu()
+    out_sw_cpu = out_sw[0].detach().cpu()
+    mismatch = (out_full_cpu != out_sw_cpu).numpy().astype(np.int32)
+    first_mismatch = int(np.where(mismatch > 0)[0][0]) if mismatch.any() else -1
+
+    # -----------------------------------------------------------------
+    # Plotting
+    # -----------------------------------------------------------------
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+
+    ax = axes[0, 0]
+    im = ax.imshow(bias_train.numpy(), aspect="auto", interpolation="nearest")
+    ax.set_title("LoD Bias (Training-style, full positions)")
+    ax.set_xlabel("latent index j")
+    ax.set_ylabel("byte position t")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    ax = axes[0, 1]
+    ax.plot(bias_infer_step.numpy(), marker="o")
+    ax.set_title(f"LoD Bias (Inference step t={step_t})")
+    ax.set_xlabel("queue latent slot")
+    ax.set_ylabel("bias")
+    ax.grid(alpha=0.3)
+
+    ax = axes[1, 0]
+    im = ax.imshow(bias_compare.numpy(), aspect="auto", interpolation="nearest")
+    ax.set_title("LoD Bias (Training formula, inference latent positions)")
+    ax.set_xlabel("queue latent slot")
+    ax.set_ylabel("byte position t")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+
+    ax = axes[1, 1]
+    ax.plot(out_full_cpu.numpy(), label="full_recompute", linewidth=1.5)
+    ax.plot(out_sw_cpu.numpy(), label="sliding_window", linewidth=1.0, alpha=0.8)
+    if first_mismatch >= 0:
+        ax.axvline(first_mismatch, color="red", linestyle="--", linewidth=1.2, label=f"first mismatch={first_mismatch}")
+    ax.set_title("Generation Alignment (token ids)")
+    ax.set_xlabel("position")
+    ax.set_ylabel("token id")
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    fig.tight_layout()
+    figure_path = out_path / "mergenet_nlp_validation.png"
+    fig.savefig(figure_path, dpi=160)
+    plt.close(fig)
+
+    # Extra compact mismatch bar plot
+    fig2, ax2 = plt.subplots(1, 1, figsize=(12, 2.5))
+    ax2.bar(np.arange(len(mismatch)), mismatch, width=1.0)
+    ax2.set_ylim(0, 1.2)
+    ax2.set_title("Full vs Sliding mismatch mask (1 = mismatch)")
+    ax2.set_xlabel("position")
+    ax2.set_ylabel("mismatch")
+    ax2.grid(alpha=0.2, axis="y")
+    fig2.tight_layout()
+    mismatch_path = out_path / "mergenet_nlp_mismatch_mask.png"
+    fig2.savefig(mismatch_path, dpi=160)
+    plt.close(fig2)
+
+    print(f"Saved: {figure_path}")
+    print(f"Saved: {mismatch_path}")
+    print(f"First mismatch index: {first_mismatch}")
+    print()
+
+
 if __name__ == "__main__":
     generation_example()
     causal_mask_sanity_check()
     sliding_window_alignment_check()
     gradient_flow_check()
+    visualization_check()
     
     print("=" * 60)
     print("✅ All examples completed successfully!")

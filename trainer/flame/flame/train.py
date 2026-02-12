@@ -33,6 +33,8 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 # ------ jinxin added ------ #
 backbone = os.environ.get("BACKBONE", "None")
 print("*" * 50)
+# Register all custom opentome model types once for HF AutoConfig/AutoModel.
+import opentome.models  # noqa: F401
 if "gated_deltanet" in backbone:
     print("Gated-DeltaNet")
     import opentome.models.gated_deltanet

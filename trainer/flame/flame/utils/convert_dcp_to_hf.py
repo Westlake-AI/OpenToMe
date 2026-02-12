@@ -17,32 +17,9 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 # ------ jinxin added ------ #
 backbone = os.environ.get("BACKBONE", "None")
 print("*" * 50)
-if "gated_deltanet" in backbone:
-    print("Gated-DeltaNet")
-    import opentome.models.gated_deltanet
-elif "delta_net" in backbone:
-    print("DeltaNet")
-    import opentome.models.delta_net
-elif "gla" in backbone:
-    print("GLA")
-    import opentome.models.gla
-elif "transformer++" in backbone:
-    print("Transformer++")
-    import opentome.models.transformer
-elif "mamba" in backbone:
-    print("Mamba")
-    import opentome.models.mamba
-elif "mamba2" in backbone:
-    print("Mamba2")
-    import opentome.models.mamba2
-elif "qwen3_next" in backbone:
-    print("Qwen3-NeXt")
-    import opentome.models.qwen3_next
-elif "blt" in backbone:
-    print("BLT")
-    import opentome.models.blt
-else:
-    print("None")
+print(backbone)
+# One-time import to register all custom model types with HF Auto classes.
+import opentome.models  # noqa: F401
 tokenizer_name = os.environ.get("TOKENIZER_NAME", "default")
 print(f"Tokenizer name: {tokenizer_name}")
 print("*" * 50)
