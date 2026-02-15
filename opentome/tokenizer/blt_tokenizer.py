@@ -123,46 +123,6 @@ class BltTokenizer(Tokenizer):
         # optional but recommended
         self.unk_token_id = None
 
-
-    # def __call__(
-    #     self,
-    #     text,
-    #     return_attention_mask: bool = False,
-    #     add_bos: bool | None = None,
-    #     add_eos: bool | None = None,
-    # ):
-    #     """
-    #     HF-compatible tokenizer interface.
-    #     """
-
-    #     # ---- normalize to batch ----
-    #     if isinstance(text, str):
-    #         texts = [text]
-    #     elif isinstance(text, list):
-    #         if not all(isinstance(t, str) for t in text):
-    #             raise TypeError("All elements in text list must be str")
-    #         texts = text
-    #     else:
-    #         raise TypeError(
-    #             f"BltTokenizer.__call__ expects str or List[str], got {type(text)}"
-    #         )
-
-    #     # ---- tokenize ----
-    #     input_ids = [
-    #         self.encode(t, add_bos=add_bos, add_eos=add_eos)
-    #         for t in texts
-    #     ]
-
-    #     output = {"input_ids": input_ids}
-
-    #     # ---- attention mask (optional) ----
-    #     if return_attention_mask:
-    #         output["attention_mask"] = [
-    #             [1] * len(ids) for ids in input_ids
-    #         ]
-
-    #     return output
-
     def __call__(
         self,
         text,

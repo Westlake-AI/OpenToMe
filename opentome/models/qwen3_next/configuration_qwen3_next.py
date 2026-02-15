@@ -3,7 +3,7 @@
 from typing import Optional
 
 from transformers.configuration_utils import PretrainedConfig, layer_type_validation
-from transformers.modeling_rope_utils import RopeParameters
+from opentome.models.modeling_rope_utils import RopeParameters
 from transformers.utils import logging
 
 

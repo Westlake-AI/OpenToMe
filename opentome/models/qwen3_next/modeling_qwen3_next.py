@@ -39,11 +39,11 @@ else:
 # from __future__ import annotations
 from .configuration_qwen3_next import Qwen3NextConfig
 
-from fla.models.utils import Cache, FLAGenerationMixin
+from opentome.models.utils import Cache, FLAGenerationMixin
 try:
     from transformers.modeling_layers import GradientCheckpointingLayer
 except ImportError:
-    from fla.models.modeling_layers import GradientCheckpointingLayer
+    from opentome.models.modeling_layers import GradientCheckpointingLayer
 
 logger = logging.get_logger(__name__)
 

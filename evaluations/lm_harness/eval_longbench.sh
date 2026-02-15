@@ -1,13 +1,10 @@
 #!/usr/bin/bash
 export HF_ENDPOINT=https://hf-mirror.com
 
-export BACKBONE=transformer++_340M
-export TOKENIZER_NAME=blt
+export BACKBONE=gsa_340M
 echo $BACKBONE
-echo $TOKENIZER_NAME
 
-MODEL='/yuchang/lsy_jx/.cache/opetome_ckpt/check_ok/byte/transformers_batch1.seqlen32768.grad_acc4.warmup2048.update1.steps20480.4gpus.lr1e-3'
-
+MODEL='/yuchang/lsy_jx/.cache/opetome_ckpt/check_ok/gsa-340M-10B/batch1.seqlen32768.grad_acc4.warmup1024.update1.steps30720.4gpus.lr3e-4'
 
 python -m harness --model hf \
     --model_args pretrained=$MODEL,dtype=bfloat16 \
