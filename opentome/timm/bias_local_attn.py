@@ -39,7 +39,7 @@ def clear_cache():
 
 
 # ============================================================================
-# Naive 实现（回退路径，不依赖 flash-attn）
+# Naive 实现（调试/对照用，不在主路径中使用）
 # ============================================================================
 
 def naive_biased_local_attention(
@@ -304,17 +304,14 @@ def biased_local_attention(
     """
     try:
         from flash_attn import flash_attn_func
-    except Exception:
+    except Exception as e_primary:
         try:
             from flash_attn.flash_attn_interface import flash_attn_func
-        except Exception:
-            # flash-attn 不可用，回退到 naive 实现
-            return naive_biased_local_attention(
-                q, k, v, bias, local_window,
-                dropout_p=dropout_p,
-                training=training,
-                x_dtype=x_dtype,
-            )
+        except Exception as e_secondary:
+            raise RuntimeError(
+                "biased_local_attention requires flash-attn. "
+                "Please install flash-attn or disable local window attention."
+            ) from e_secondary
     
     # 自动检测输入格式：(B, N, H, D) vs (B, H, N, D)
     # flash-attn 期望 (B, H, N, D) 或通过 transpose 转换
@@ -505,17 +502,14 @@ def unbiased_local_attention(
     """
     try:
         from flash_attn import flash_attn_func
-    except Exception:
+    except Exception as e_primary:
         try:
             from flash_attn.flash_attn_interface import flash_attn_func
-        except Exception:
-            # flash-attn 不可用，回退到 naive 实现
-            return naive_unbiased_local_attention(
-                q, k, v, local_window,
-                dropout_p=dropout_p,
-                training=training,
-                x_dtype=x_dtype,
-            )
+        except Exception as e_secondary:
+            raise RuntimeError(
+                "unbiased_local_attention requires flash-attn. "
+                "Please install flash-attn or disable local window attention."
+            ) from e_secondary
     
     # 自动检测输入格式
     assert q.ndim == 4, f"q must be 4D, got shape {q.shape}"

@@ -573,7 +573,6 @@ def build_dataset(
             split=dataset_split,
             data_dir=data_dir,
             data_files=data_files,
-            trust_remote_code=True,
             streaming=streaming,
             num_proc=num_workers if not streaming else None,
         )
@@ -600,7 +599,6 @@ def build_dataset(
                     split=dataset_split,
                     data_dir=data_dir,
                     data_files=data_files,
-                    trust_remote_code=True,
                     streaming=False,
                     num_proc=num_workers,
                 )
@@ -662,7 +660,6 @@ def build_dataset(
                 split=dataset_splits[i],
                 data_dir=data_dirs[i],
                 data_files=data_files[i],
-                trust_remote_code=True,
                 streaming=streaming,
                 num_proc=(
                     num_workers
@@ -702,7 +699,6 @@ def build_dataset(
                         split=dataset_splits[i],
                         data_dir=data_dirs[i],
                         data_files=data_files[i],
-                        trust_remote_code=True,
                         streaming=False,
                         num_proc=num_workers,
                     )

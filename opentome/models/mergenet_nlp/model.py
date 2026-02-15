@@ -33,8 +33,8 @@ from fla.modules import FusedCrossEntropyLoss, FusedLinearCrossEntropyLoss
 from fla.modules.l2warp import l2_warp
 
 from opentome.models.modeling_layers import GradientCheckpointingLayer
-from opentome.timm.dtem import DTEMBlock, DTEMAttention
-from opentome.timm.attention import Attention as TimmAttention, Block as TimmBlock
+from opentome.timm.dtem import DTEMBlock
+from opentome.timm.bias_local_attn import LocalBlock
 from opentome.tome.tome import parse_r
 
 from .configuration_mergenet import MergeNetConfig
@@ -119,6 +119,16 @@ class MyCrossAttention(nn.Module):
         context = self.out_proj(context.to(q_proj.dtype))
         context = self.proj_drop(context)
         return context
+
+
+class DTEMMergeOnly(DTEMBlock):
+    """
+    DTEM merge-only helper (no attention/MLP parameters).
+    Reuses DTEMBlock's selection + merge logic without creating unused params.
+    """
+
+    def __init__(self):
+        nn.Module.__init__(self)
 
 
 # =====================================================================
@@ -276,18 +286,21 @@ class LocalEncoderNLP(nn.Module):
     def __init__(self, config: MergeNetConfig):
         super().__init__()
         self.config = config
-        
-        # Determine feature dim for metric
-        if config.dtem_feat_dim is not None:
-            feat_dim = config.dtem_feat_dim
+        if config.local_depth <= 0:
+            raise ValueError("local_depth must be >= 1")
+
+        self.local_depth = config.local_depth
+
+        # Local Transformer Blocks for full-length token encoding.
+        local_window = config.dtem_window_size if config.dtem_window_size is not None else 16
+        # Use pure Python to support meta-device model initialization in flame.
+        if self.local_depth == 1:
+            dpr = [float(config.drop_path_rate)]
         else:
-            dim = config.hidden_size
-            feat_dim = config.hidden_size // config.num_heads if dim < 1024 else 2 * (config.hidden_size // config.num_heads)
-        
-        # Create timm-style Blocks (will be patched to DTEMBlocks)
-        # Note: Using LayerNorm instead of RMSNorm for compatibility with timm
+            denom = float(max(self.local_depth - 1, 1))
+            dpr = [float(config.drop_path_rate) * i / denom for i in range(self.local_depth)]
         self.blocks = nn.ModuleList([
-            TimmBlock(
+            LocalBlock(
                 dim=config.hidden_size,
                 num_heads=config.num_heads,
                 mlp_ratio=config.intermediate_size / config.hidden_size,
@@ -295,51 +308,78 @@ class LocalEncoderNLP(nn.Module):
                 qk_norm=config.qk_norm,
                 proj_drop=config.drop_rate,
                 attn_drop=config.attn_drop_rate,
-                drop_path=config.drop_path_rate * (i / max(config.local_depth - 1, 1)),  # Stochastic depth
+                drop_path=dpr[i],
                 norm_layer=nn.LayerNorm,
-                use_flash_attn=False,  # Will use custom attention in DTEM
+                local_window=local_window,
             )
-            for i in range(config.local_depth)
+            for i in range(self.local_depth)
         ])
-        
-        # Apply DTEM patch (directly use dtem.py logic)
-        self._apply_dtem_patch(feat_dim)
-    
-    def _apply_dtem_patch(self, feat_dim):
-        """Apply DTEM patch using the existing dtem.py implementation."""
-        # Create shared _tome_info dict
+
+        # DTEM metric head (one per local layer), same as CV merge-only logic.
+        self.metric_dim = self._resolve_metric_dim(config.hidden_size, config.num_heads, config.dtem_feat_dim)
+        self.metric_layers = nn.ModuleList([
+            nn.Linear(config.hidden_size, self.metric_dim) for _ in range(self.local_depth)
+        ])
+
+        # Reuse DTEM merge logic only.
+        self.merge_block = DTEMMergeOnly()
+        window_size = config.dtem_window_size if config.dtem_window_size is not None else 0
         self._tome_info = {
-            "r": None,  # Will be set in forward
+            "r": None,
             "size": None,
             "source_map": None,
             "source_matrix": None,
             "total_merge": None,
             "trace_source": True,
             "prop_attn": True,
-            "class_token": False,  # ❗Key: NLP has no cls token
+            "class_token": False,  # NLP has no cls token.
             "distill_token": False,
-            "source_tracking_mode": 'matrix',
-            "window_size": self.config.dtem_window_size,
-            "t": self.config.dtem_t,
-            "use_softkmax": self.config.use_softkmax,
+            "source_tracking_mode": "matrix",
+            "window_size": window_size,
+            "t": config.dtem_t,
+            "use_softkmax": config.use_softkmax,
             "tau1": 1.0,
             "tau2": 30.0,
-            "feat_dim": feat_dim,
-            "local_depth": self.config.local_depth,
-            "swa_size": self.config.dtem_window_size,
+            "feat_dim": self.metric_dim,
+            "local_depth": self.local_depth,
+            "swa_size": config.dtem_window_size,
         }
-        
-        # Patch blocks to DTEMBlock and attention to DTEMAttention
-        for block in self.blocks:
-            block.__class__ = DTEMBlock
-            block._tome_info = self._tome_info
-            
-            # Patch attention
-            if hasattr(block, 'attn'):
-                block.attn.__class__ = DTEMAttention
-                block.attn._tome_info = self._tome_info
-                # Add metric layer
-                block.attn.patch(feat_dim)
+        self.merge_block._tome_info = self._tome_info
+        self.default_r = 0
+
+    @staticmethod
+    def _resolve_metric_dim(embed_dim: int, num_heads: int, dtem_feat_dim):
+        if dtem_feat_dim is not None:
+            return dtem_feat_dim
+        head_dim = embed_dim // num_heads
+        return head_dim if embed_dim < 1024 else 2 * head_dim
+
+    def _aggregate_with_source_matrix(self, x, size, source_matrix):
+        if source_matrix is None:
+            return x
+        center = self._tome_info["source_matrix_center"]
+        width = self._tome_info["source_matrix_width"]
+        _, N, _ = x.shape
+        device = x.device
+
+        # Memory-saving path: avoid materializing (B, N, width, C).
+        summed = torch.zeros_like(x)
+        base_positions = torch.arange(N, device=device)
+        for offset in range(width):
+            pos = base_positions + (offset - center)
+            valid = (pos >= 0) & (pos < N)
+            pos_clamped = pos.clamp(0, N - 1)
+            gathered = x[:, pos_clamped, :]  # (B, N, C)
+            weight = source_matrix[:, :, offset]
+            if not valid.all():
+                weight = weight * valid.to(x.dtype)
+            summed = summed + gathered * weight.unsqueeze(-1)
+
+        if size is not None:
+            denom = size.squeeze(-1).clamp(min=1e-6).unsqueeze(-1)
+        else:
+            denom = source_matrix.sum(dim=-1, keepdim=True).clamp(min=1e-6)
+        return summed / denom
 
     def forward(self, hidden_states, phase='phase2'):
         """
@@ -352,52 +392,57 @@ class LocalEncoderNLP(nn.Module):
             source_matrix: (B, N, width) - source tracking
             info: dict - additional information
         """
-        B, L, d = hidden_states.shape
-        
-        # Calculate total merge count: L - L/lambda
-        total_merge = int(L * (1 - 1/self.config.lambda_local))
-        r_per_layer = total_merge // max(self.config.local_depth, 1)
-        
-        # Initialize
-        n = L
-        size = torch.ones(B, L, 1, device=hidden_states.device, dtype=hidden_states.dtype)
-        source_matrix = None
-        
-        # Set up _tome_info for this forward pass
-        self._tome_info["r"] = parse_r(
-            len(self.blocks), 
-            r_per_layer, 
-            total_merge
-        )
-        self._tome_info["size"] = size
+        del phase  # kept for backward-compatible signature
+        B, L, _ = hidden_states.shape
+
+        x_layers = []
+        x = hidden_states
+        for local_blk in self.blocks:
+            x = local_blk(x)
+            x_layers.append(x)
+        if not x_layers:
+            raise RuntimeError("LocalEncoderNLP requires at least one local block.")
+
+        x_embed = x_layers[-1]
+        x_merge = x_embed
+        n = x_merge.shape[1]
+
+        total_merge = int(L * (1 - 1 / self.config.lambda_local))
+        self.default_r = total_merge // max(self.local_depth, 1)
+        r_list = parse_r(self.local_depth, self.default_r, total_merge)
+
+        self._tome_info["r"] = r_list
         self._tome_info["total_merge"] = total_merge
+        self._tome_info["size"] = torch.ones_like(x_merge[..., 0:1])
         self._tome_info["token_counts_local"] = []
-        
-        # Forward through DTEM blocks
-        # DTEMBlock.forward(x, size, n, source_matrix) returns (x, size, n, metric, source_matrix)
-        for block in self.blocks:
-            hidden_states, size, n, _, source_matrix = block(
-                hidden_states, 
-                size, 
-                n=n, 
-                source_matrix=source_matrix
+
+        size = self._tome_info["size"]
+        source_matrix = None
+        for i, layer_x in enumerate(x_layers):
+            x_metric = self._aggregate_with_source_matrix(layer_x, size, source_matrix)
+            metric = self.metric_layers[i](x_metric.detach())
+            r = r_list[i] if i < len(r_list) else 0
+
+            x_merge, size, n, _, source_matrix = self.merge_block._merge_train(
+                x_merge, size, r, n, {"metric": metric}, source_matrix
             )
-            # Guard against NaN/Inf from DTEM attention (debug stability)
-            if not torch.isfinite(hidden_states).all():
+            self._tome_info["size"] = size
+            self._tome_info["token_counts_local"].append(x_merge.shape[1])
+
+            # Guard against NaN/Inf from DTEM merging (debug stability).
+            if not torch.isfinite(x_merge).all():
                 warnings.warn(
                     "Non-finite values detected in LocalEncoderNLP output; "
                     "applying nan_to_num fallback.",
                     stacklevel=2,
                 )
-                hidden_states = torch.nan_to_num(hidden_states, nan=0.0, posinf=1e4, neginf=-1e4)
+                x_merge = torch.nan_to_num(x_merge, nan=0.0, posinf=1e4, neginf=-1e4)
             if size is not None and not torch.isfinite(size).all():
                 size = torch.nan_to_num(size, nan=0.0, posinf=1e4, neginf=-1e4)
-            self._tome_info["token_counts_local"].append(hidden_states.shape[1])
-        
-        # Store source matrix info
+
         self._tome_info["source_matrix"] = source_matrix
-        
-        return hidden_states, size, source_matrix, self._tome_info
+        self._tome_info["x_embed"] = x_embed
+        return x_merge, size, source_matrix, self._tome_info
 
 
 # =====================================================================
@@ -497,6 +542,31 @@ class LocalDecoder(nn.Module):
         self.W_infer = config.W_infer
         self.gamma = config.grid_bias_gamma
 
+    def build_decoder_bias(self, query_states, latent_words, byte_positions=None, latent_positions=None):
+        B, L, _ = query_states.shape
+        N = latent_words.shape[1]
+        device = query_states.device
+        dtype = query_states.dtype
+
+        if byte_positions is None:
+            byte_positions = torch.arange(L, device=device)
+        if latent_positions is None:
+            latent_positions = torch.arange(N, device=device)
+
+        t_indices = byte_positions.to(device=device, dtype=dtype).view(1, L, 1)
+        j_indices = latent_positions.to(device=device, dtype=dtype).view(1, 1, N)
+
+        # Grid bias: -gamma * |t/lambda - j|
+        grid_bias = -self.gamma * torch.abs(t_indices / self.lambda_local - j_indices)
+
+        # Causal sliding band in latent index space.
+        latent_cursor = torch.floor(t_indices / self.lambda_local)
+        cond_causal = j_indices <= latent_cursor
+        cond_window = j_indices >= (latent_cursor - self.W_infer)
+        invalid = torch.full_like(grid_bias, -1e10)
+        mask_val = torch.where(cond_causal & cond_window, torch.zeros_like(grid_bias), invalid)
+        return grid_bias + mask_val
+
     def forward(self, query_states, latent_words, byte_positions=None, latent_positions=None):
         """
         Args:
@@ -507,39 +577,12 @@ class LocalDecoder(nn.Module):
         Returns:
             decoded_states: (B, L, d) - byte-level representations
         """
-        B, L, d = query_states.shape
-        N = latent_words.shape[1]
-        device = query_states.device
-        
-        # Use provided positions or default to relative positions
-        if byte_positions is None:
-            t_indices = torch.arange(L, device=device, dtype=query_states.dtype).view(1, L, 1)
-        else:
-            t_indices = byte_positions.to(dtype=query_states.dtype).view(1, L, 1)
-        
-        if latent_positions is None:
-            j_indices = torch.arange(N, device=device, dtype=query_states.dtype).view(1, 1, N)
-        else:
-            j_indices = latent_positions.to(dtype=query_states.dtype).view(1, 1, N)
-        
-        # Construct Band Mask + Grid Bias
-        # Grid Bias: -gamma * |t/lambda - j|
-        grid_bias = -self.gamma * torch.abs(t_indices / self.lambda_local - j_indices)
-        
-        # Band Mask: Causal + Window constraint
-        # For each byte position t, it can only attend to latent words in range:
-        # j_center = floor(t / lambda), valid range: [j_center - W_infer, j_center]
-        # band_mask = torch.full((B, L, N), float('-inf'), device=device, dtype=query_states.dtype)
-        
-        # Loop over bytes to compute band mask
-        # Vectorized band mask computation (no loops!)
-        cond_causal = j_indices <= (t_indices / self.lambda_local)
-        cond_window = j_indices >= (t_indices / self.lambda_local - self.W_infer)
-        mask_val = torch.where(cond_causal & cond_window, 0.0, float('-inf'))
-        # Combine grid bias and band mask
-        combined_mask = grid_bias + mask_val
-        combined_mask = combined_mask.to(torch.bfloat16)
-        # import pdb;pdb.set_trace()
+        combined_mask = self.build_decoder_bias(
+            query_states,
+            latent_words,
+            byte_positions=byte_positions,
+            latent_positions=latent_positions,
+        )
         # Cross-attention: Q from bytes, KV from latent words
         decoded_states = self.cross_attention(query_states, latent_words, mask=combined_mask)
         
@@ -619,11 +662,12 @@ class MergeNetModel(MergeNetPreTrainedModel):
         
         # Stage 2: Soft Token Merging (LoE)
         Z_merged, size, source_matrix, info_local = self.local_encoder(H, phase=self.config.phase)
+        x_embed = info_local.get("x_embed", H_original)
         # Z_merged: (B, N_merged, d), N_merged ≈ L - total_merge
         
         # Stage 3: TopK Selection + Perceiver Cross-Attention
         Z, size_z = self._select_and_refine_tokens(
-            Z_merged, size, source_matrix, H_original, info_local
+            Z_merged, size, source_matrix, x_embed, info_local
         )
         # Z: (B, N, d), N = target latent words count
         
@@ -983,161 +1027,94 @@ class MergeNetForCausalLM(MergeNetPreTrainedModel):
         
         # Step 2: LoE - soft token merging with DTEM
         Z_merged, size_merged, source_matrix, info_local = self.model.local_encoder(H_full, phase=self.config.phase)
+        x_embed = info_local.get("x_embed", H_full)
         # Z_merged: (B, N_merged, d), N_merged ≈ L - total_merge
         
         # Step 3: TopK Selection + Perceiver Cross-Attention
-        Z_full, size_full = self.model._select_and_refine_tokens(
-            Z_merged, size_merged, source_matrix, H_full, info_local
+        Z_full, _ = self.model._select_and_refine_tokens(
+            Z_merged, size_merged, source_matrix, x_embed, info_local
         )
         # Z_full: (B, M, d), M = L_prompt / λ (target latent count)
-        
-        # Step 4: Build LaM cache up to M-1 tokens (leave last for autoregressive generation)
-        # IMPORTANT: O_queue should contain Z (LoE output), not O (LaM output)!
-        # Because O[i] is used to decode bytes of latent word i, and we need Z as starting point
+
+        # Step 4: Build latent outputs O_full and LaM cache from prompt latent words.
+        O_full, past_key_values_lam = self.model.latent_model(
+            Z_full, size=None, attention_mask=None, past_key_values=None, use_cache=True
+        )
         M_total = Z_full.shape[1]
-        
-        # Build LaM cache with first M-1 tokens
-        if M_total > 1:
-            Z_init = Z_full[:, :-1, :]  # First M-1 tokens for cache
-            _, past_key_values_lam = self.model.latent_model(
-                Z_init, size=None, attention_mask=None, past_key_values=None, use_cache=True
-            )  # Build cache, discard output (we'll use Z for queue)
-        else:
-            past_key_values_lam = None
-        
-        # === Extract sliding window for latent queue ===
-        # CRITICAL: Initialize O_queue with Z, not O!
-        # Z represents the "input" latent words, O will be generated autoregressively
+
+        # Sliding latent queue stores O only (consistent with training-time decoder KV).
         if M_total >= N_queue:
-            O_queue = Z_full[:, -N_queue:, :].clone()  # (B, N_queue, d) - use Z!
+            O_queue = O_full[:, -N_queue:, :].clone()
+            latent_positions = torch.arange(M_total - N_queue, M_total, device=device, dtype=torch.long)
         else:
-            # Pad if needed
             pad_len = N_queue - M_total
             O_queue = torch.cat([
-                torch.zeros(B, pad_len, Z_full.shape[2], device=device, dtype=Z_full.dtype),
-                Z_full
-            ], dim=1)  # (B, N_queue, d)
-        
-        # Prepare input for first LaM autoregressive generation
-        # Feed the last Z to generate first O
-        next_latent_input = Z_full[:, -1:, :].clone() if M_total > 0 else None
-        
-        # === Maintain FULL byte sequence (no truncation) ===
-        # LoT uses global causal attention with KV cache
-        # byte_sequence: accumulates all generated bytes
-        byte_sequence = input_ids.clone()  # (B, L_prompt)
-        
-        # Track latent pointer (continuous, supports non-integer lambda)
-        # Pointer increases by 1/λ for each byte generated
-        # When floor(ptr) changes, we cross a latent word boundary
-        ptr = L_prompt / lambda_local  # Initial pointer position
-        prev_latent_idx = int(ptr)
-        
-        # Track the input for next LaM autoregressive generation
-        # First time: use Z_last (held out from init)
-        # Subsequent times: use the output from previous generation
-        
-        # Track latent positions in O_queue for proper band mask calculation
-        # Note: O_queue contains Z (not O), with M_total latent words
-        if M_total >= N_queue:
-            # O_queue = Z_full[-N_queue:]
-            start_latent_idx = M_total - N_queue
-            latent_positions = torch.arange(start_latent_idx, M_total, device=device)
-        else:
-            # O_queue = [padding, Z_full]
-            pad_len = N_queue - M_total
+                torch.zeros(B, pad_len, O_full.shape[2], device=device, dtype=O_full.dtype),
+                O_full,
+            ], dim=1)
             latent_positions = torch.cat([
-                torch.full((pad_len,), -1000, device=device, dtype=torch.long),  # padding
-                torch.arange(M_total, device=device)  # actual latents [0, ..., M_total-1]
+                torch.full((pad_len,), -10**9, device=device, dtype=torch.long),
+                torch.arange(M_total, device=device, dtype=torch.long),
             ], dim=0)
-        
-        # Initialize generation state
-        current_pos = L_prompt  # Current byte position
-        # import pdb;pdb.set_trace()
+
+        # Maintain full generated byte sequence for API compatibility.
+        byte_sequence = input_ids.clone()
+        current_pos = L_prompt
+
+        # Autoregressive latent generation state.
+        next_latent_input = O_full[:, -1:, :].clone() if M_total > 0 else None
+        next_latent_idx = M_total
+
         for step in range(max_length - L_prompt):
-            # === Decoding: Use LAST byte's H as query, O_queue as KV ===
-            # Get H for the most recent byte
+            # Decode next byte using current byte hidden state as query.
             if step == 0:
-                # First step: Use the last hidden state from init (already in cache)
-                # Don't re-process the last byte!
-                H_current = H_full[:, -1:, :]  # (B, 1, d)
+                H_current = H_full[:, -1:, :]
             else:
-                # Subsequent steps: Process the newly generated byte with cache
-                last_byte = byte_sequence[:, -1:].clone()  # (B, 1)
+                last_byte = byte_sequence[:, -1:].clone()
                 H_current, past_key_values_lot = self.model.shared_local_transformer(
-                    last_byte, 
-                    attention_mask=None, 
-                    past_key_values=past_key_values_lot, 
-                    use_cache=True
-                )  # (B, 1, d)
-            
-            # LocalDecoder: Cross-attention Q=H_current, KV=O_queue
-            # Pass positions for correct band mask calculation
-            byte_pos = torch.tensor([current_pos - 1], device=device)  # -1 because current_pos is next position
+                    last_byte,
+                    attention_mask=None,
+                    past_key_values=past_key_values_lot,
+                    use_cache=True,
+                )
+
+            byte_pos = torch.tensor([current_pos - 1], device=device, dtype=torch.long)
             H_decoded = self.model.local_decoder(
-                H_current, 
+                H_current,
                 O_queue,
                 byte_positions=byte_pos,
-                latent_positions=latent_positions
-            )  # (B, 1, d)
-            
-            # Predict next byte
-            logits = self.lm_head(H_decoded[:, 0, :])  # (B, vocab_size)
-            
-            # Sample next token
+                latent_positions=latent_positions,
+            )
+            logits = self.lm_head(H_decoded[:, 0, :])
             next_token = self._sample_next_token(logits, temperature, top_p, top_k)
-            
-            # Check for EOS
+
             if (next_token == self.config.eos_token_id).all():
                 break
-            
-            # === Update state for next iteration ===
-            # Append new byte to full sequence (for position tracking)
-            byte_sequence = torch.cat([byte_sequence, next_token], dim=1)  # (B, L_current+1)
-            
-            # Update current byte position
+
+            byte_sequence = torch.cat([byte_sequence, next_token], dim=1)
             current_pos += 1
-            
-            # Note: LoT's KV cache (past_key_values_lot) is automatically updated
-            # No need to recompute H for full sequence - O(T) per step instead of O(T²)
-            
-            # === Update latent queue when crossing latent word boundary ===
-            # Advance pointer by 1/λ for each byte
-            ptr += 1.0 / lambda_local
-            current_latent_idx = int(ptr)  # Floor division
-            
-            # Check if we've crossed into a new latent word
-            if current_latent_idx > prev_latent_idx:
-                # LaM autoregressively generates next O (latent representation)
-                # Workflow: Z[0]...Z[i] or O[0]...O[i] → LaM → O[i+1]
-                # Then O[i+1] is used to decode bytes of latent word i+1
-                
-                # Feed the input (first time: Z_last; later: previous O) into LaM
+
+            # Ensure latent queue covers the decoder receptive field for next query.
+            # Next query uses byte index (current_pos - 1).
+            required_latent_idx = int(math.floor((current_pos - 1) / lambda_local))
+            while next_latent_input is not None and next_latent_idx <= required_latent_idx:
                 O_new, past_key_values_lam = self.model.latent_model(
-                    next_latent_input,  # First time: Z[-1]; Later: previous O_new
+                    next_latent_input,
                     size=None,
                     attention_mask=None,
                     past_key_values=past_key_values_lam,
-                    use_cache=True
-                )  # (B, 1, d)
-                
-                # Sliding window: remove oldest element (Z or O), append new O
-                # Gradually O_queue transitions from all Z to all O
-                O_queue = torch.cat([O_queue[:, 1:, :], O_new], dim=1)  # (B, N_queue, d)
-                
-                # Update latent positions: slide window
+                    use_cache=True,
+                )
+
+                O_queue = torch.cat([O_queue[:, 1:, :], O_new], dim=1)
                 latent_positions = torch.cat([
-                    latent_positions[1:], 
-                    torch.tensor([current_latent_idx-1], device=device)
+                    latent_positions[1:],
+                    torch.tensor([next_latent_idx], device=device, dtype=torch.long),
                 ], dim=0)
-                
-                # Prepare input for next autoregressive generation
-                # Standard GPT: use previous output as next input
+
                 next_latent_input = O_new
-                
-                # Update tracking
-                prev_latent_idx = current_latent_idx
-        
+                next_latent_idx += 1
+
         return byte_sequence
     
     def _sample_next_token(self, logits, temperature, top_p, top_k):
