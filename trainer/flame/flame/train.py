@@ -19,7 +19,7 @@ from torchtitan.components.ft import FTParallelDims, init_ft_manager
 from torchtitan.components.loss import build_cross_entropy_loss
 from torchtitan.components.lr_scheduler import build_lr_schedulers
 from torchtitan.components.metrics import build_device_memory_monitor, build_metrics_processor, ensure_pp_loss_visible
-from torchtitan.components.optimizer import build_optimizers
+# from torchtitan.components.optimizer import build_optimizers
 from torchtitan.distributed import ParallelDims
 from torchtitan.distributed import utils as dist_utils
 from torchtitan.protocols.model_converter import build_model_converters
@@ -33,8 +33,6 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 # ------ jinxin added ------ #
 backbone = os.environ.get("BACKBONE", "None")
 print("*" * 50)
-# Register all custom opentome model types once for HF AutoConfig/AutoModel.
-import opentome.models  # noqa: F401
 if "gated_deltanet" in backbone:
     print("Gated-DeltaNet")
     import opentome.models.gated_deltanet
@@ -58,13 +56,18 @@ elif "blt" in backbone:
     import opentome.models.blt
 else:
     print("None")
+# --- Tokenizer & Optimizer --- #
 tokenizer_name = os.environ.get("TOKENIZER_NAME", "default")
+default_opt = os.environ.get("DEFAULT_OPT", "AdamW")
+if default_opt in ["AdamW", "Adam"]:    # these are the default optimizers in flame
+    from torchtitan.components.optimizer import build_optimizers
+else:
+    from opentome.utils.optimization import build_optimizers
 print(f"Tokenizer name: {tokenizer_name}")
-print("*" * 50)
-
+print(f"Optimizer: {default_opt}")
 # from ipdb import set_trace as point
 from opentome.tokenizer.build_tokenizer import TokenizerArgs
-
+print("*" * 50)
 # ------ End of jinxin added ------ #
 
 from flame.components.checkpoint import TrainState
@@ -196,40 +199,6 @@ def main(job_config: JobConfig):
                 "add_eos": True,
             }
         ).build()
-    logger.info(
-        f"Loading dataset {job_config.training.dataset}"
-        f":{job_config.training.dataset_name}"
-        if job_config.training.dataset_name is not None
-        else ""
-    )
-    dataset = build_dataset(
-        dataset=job_config.training.dataset,
-        dataset_name=job_config.training.dataset_name,
-        dataset_split=job_config.training.dataset_split,
-        data_dir=job_config.training.data_dir,
-        data_files=job_config.training.data_files,
-        data_probs=job_config.training.data_probs,
-        streaming=job_config.training.streaming,
-        dp_degree=dp_degree,
-        num_workers=job_config.training.num_workers,
-        seed=job_config.training.seed,
-    )
-
-    logger.info("Building dataloader...")
-    dataloader = build_dataloader(
-        dataset=dataset,
-        tokenizer=tokenizer,
-        rank=dp_rank,
-        world_size=dp_degree,
-        batch_size=job_config.training.batch_size,
-        seq_len=job_config.training.seq_len,
-        context_len=job_config.training.context_len,
-        varlen=job_config.training.varlen,
-        num_workers=job_config.training.num_workers,
-        pin_memory=job_config.training.pin_memory,
-        persistent_workers=job_config.training.persistent_workers,
-        snapshot_every_n_steps=job_config.checkpoint.interval,
-    )
 
     logger.info(f"Loading model config from {job_config.model.config}")
     model_config = AutoConfig.from_pretrained(job_config.model.config)
@@ -347,7 +316,16 @@ def main(job_config: JobConfig):
     )
 
     # build optimizer after applying parallelisms to the model
-    optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager)
+    if default_opt == "Muon":
+        muon_params = [
+            p for name, p in model.named_parameters() if p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
+        ]
+        adamw_params = [
+            p for name, p in model.named_parameters() if not (p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name)
+        ]
+        optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager, muon_params, adamw_params)
+    else:
+        optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager)
     lr_schedulers = train_spec.build_lr_schedulers_fn(optimizers, job_config)
     # Post optimizer step model converters hook.
     # e.g. calculate float8 dynamic amax/scale for all-parameter for FSDP2
@@ -357,6 +335,41 @@ def main(job_config: JobConfig):
     )
 
     train_state = TrainState()
+
+    logger.info(
+        f"Loading dataset {job_config.training.dataset}"
+        f":{job_config.training.dataset_name}"
+        if job_config.training.dataset_name is not None
+        else ""
+    )
+    dataset = build_dataset(
+        dataset=job_config.training.dataset,
+        dataset_name=job_config.training.dataset_name,
+        dataset_split=job_config.training.dataset_split,
+        data_dir=job_config.training.data_dir,
+        data_files=job_config.training.data_files,
+        data_probs=job_config.training.data_probs,
+        streaming=job_config.training.streaming,
+        dp_degree=dp_degree,
+        num_workers=job_config.training.num_workers,
+        seed=job_config.training.seed,
+    )
+
+    logger.info("Building dataloader...")
+    dataloader = build_dataloader(
+        dataset=dataset,
+        tokenizer=tokenizer,
+        rank=dp_rank,
+        world_size=dp_degree,
+        batch_size=job_config.training.batch_size,
+        seq_len=job_config.training.seq_len,
+        context_len=job_config.training.context_len,
+        varlen=job_config.training.varlen,
+        num_workers=job_config.training.num_workers,
+        pin_memory=job_config.training.pin_memory,
+        persistent_workers=job_config.training.persistent_workers,
+        snapshot_every_n_steps=job_config.checkpoint.interval,
+    )
 
     # load initial checkpoint
     checkpoint = CheckpointManager(

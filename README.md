@@ -175,6 +175,10 @@ NNODE=1 NGPU=8 LOG_RANK=0 bash train.sh \
   --metrics.log_freq 1
 ```
 
+``
+NOTE: OpenToMe now support other optimizers for training.
+``
+
 ### Evaluation of PPL and Common-sense Resaoning/QA
 The evaluation we follow up with the [**flash-linear-attention**](https://github.com/fla-org/flash-linear-attention/blob/main/README.md). Please confirm that the requirements for [**lmms-eval-harness**](https://github.com/EleutherAI/lm-evaluation-harness/blob/main/README.md?plain=1) are satisfied.
 
@@ -211,13 +215,14 @@ python -m harness --model hf \
 ## Support Tasks (TODO List)
 
 - [x] Image Classification
-- [ ] Image Generation
-- [ ] MLLM Inference
 - [x] LLM Inference 
 - [x] Long Sequence Training
 - [x] Throughput
-- [ ] AI for Science
 - [x] ToMe Visualization
+- [x] Optimizers
+- [ ] AI for Science
+- [ ] Image Generation
+- [ ] MLLM Inference
 
 ## Summary Functions
 

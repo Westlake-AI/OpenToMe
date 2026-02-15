@@ -6,7 +6,7 @@ from opentome.models.gla import GLAConfig, GLAForCausalLM, GLAModel
 from opentome.models.transformer import TransformerConfig, TransformerForCausalLM, TransformerModel
 from opentome.models.mergenet_nlp import MergeNetConfig, MergeNetForCausalLM, MergeNetModel
 from opentome.models.gsa import GSAConfig, GSAForCausalLM, GSAModel
-from opentome.models.qwen3_next import Qwen3NextConfig, Qwen3NextForCausalLM, Qwen3NextModel
+# from opentome.models.qwen3_next import Qwen3NextConfig, Qwen3NextForCausalLM, Qwen3NextModel
 
 # --- Classification Models ---
 from opentome.models.deit.deit import DeiTModel, deit_s, deit_s_extend
@@ -20,7 +20,7 @@ __all__ = [
     'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
     'MergeNetConfig', 'MergeNetForCausalLM', 'MergeNetModel',
     'GSAConfig', 'GSAForCausalLM', 'GSAModel',
-    'Qwen3NextConfig', 'Qwen3NextForCausalLM', 'Qwen3NextModel'
+    # 'Qwen3NextConfig', 'Qwen3NextForCausalLM', 'Qwen3NextModel'
 
     'DeiTModel', 'deit_s', 'deit_s_extend',
     'HybridToMeModel',

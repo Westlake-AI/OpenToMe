@@ -1400,9 +1400,15 @@ class BltForCausalLM(BltPreTrainedModel, FLAGenerationMixin):
         logits_to_keep: Union[int, torch.Tensor] = 0,
         **kwargs: Unpack[TransformersKwargs],
     ) -> Union[tuple, CausalLMOutputWithPast]:
-
-
-        # Call parent forward but exclude cross_attention_states from model call
+        r"""
+        Args:
+            cross_attention_states (`Optional[torch.LongTensor]`, *optional*):
+                Cross attention states for the model. Used for compatibility with cross-attention mechanisms.
+            cross_attention_mask (`Optional[torch.LongTensor]`, *optional*):
+                Mask for cross attention states. Used to mask out certain positions in cross attention.
+            full_text_row_masked_out_mask (`Optional[tuple[torch.Tensor, torch.Tensor]]`, *optional*):
+                Mask for full text row masking. A tuple of two tensors used to mask out certain rows in the full text.
+        """
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,

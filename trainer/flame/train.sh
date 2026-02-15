@@ -69,20 +69,16 @@ config=$(grep -oP '(?<=--model.config )[^ ]+' <<< "$params")
 tokenizer=$(grep -oP '(?<=--model.tokenizer_path )[^ ]+' <<< "$params")
 
 # Register all local model types once so AutoConfig can resolve custom model_type.
-python -c "import opentome.models" 2>/dev/null || true
-
-# 2>/dev/null: warnings from transformers/blt go to stderr, keep stdout (model_type) only
-# tail -1: safety in case any other stdout; model_type is the last line
 model=$(
-  python -c "import fla, sys; import opentome.models; from transformers import AutoConfig; print(AutoConfig.from_pretrained(sys.argv[1]).model_type)" "$config" 2>/dev/null | tail -1
+  python -c "import fla, sys; import opentome.models" "$config" | jq -r '.model_type'
 )
 
 mkdir -p $path
 cp * $path 2>/dev/null || true
 cp -r configs $path 2>/dev/null || true
 cp -r flame   $path 2>/dev/null || true
-# cp -r 3rdparty/flash-linear-attention/fla $path 2>/dev/null || true
-# cp -r 3rdparty/torchtitan/torchtitan $path 2>/dev/null || true
+cp -r 3rdparty/flash-linear-attention/fla $path 2>/dev/null || true
+cp -r 3rdparty/torchtitan/torchtitan $path 2>/dev/null || true
 
 # for offline systems
 # export TRANSFORMERS_OFFLINE=1
@@ -94,16 +90,16 @@ fi
 RUN_NAME="$model-$(basename $path)"
 RUN_ID="$RUN_NAME-$date"
 
-export WANDB_RESUME=allow
-if [[ -z "${WANDB_PROJECT:-}" ]]; then
-  export WANDB_PROJECT="fla"
-fi
-if [[ -z "${WANDB_NAME:-}" ]]; then
-  export WANDB_NAME="$RUN_NAME"
-fi
-if [[ -z "${WANDB_RUN_ID:-}" ]]; then
-  export WANDB_RUN_ID="$RUN_ID"
-fi
+# export WANDB_RESUME=allow
+# if [[ -z "${WANDB_PROJECT:-}" ]]; then
+#   export WANDB_PROJECT="fla"
+# fi
+# if [[ -z "${WANDB_NAME:-}" ]]; then
+#   export WANDB_NAME="$RUN_NAME"
+# fi
+# if [[ -z "${WANDB_RUN_ID:-}" ]]; then
+#   export WANDB_RUN_ID="$RUN_ID"
+# fi
 
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" \
 torchrun --nnodes=${NNODE} \
