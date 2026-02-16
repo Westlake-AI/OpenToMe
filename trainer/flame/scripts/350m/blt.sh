@@ -2,29 +2,31 @@
 
 export HF_ENDPOINT=https://hf-mirror.com
 export HF_HOME=/ssdwork/lisiyuan/hf_cache/
-export BACKBONE=transformer++_340M
-export DEFAULT_OPT=Conda # AdamW, SGD, RMSprop, Adagrad, Adamax
+export BACKBONE=blt
+export TOKENIZER_NAME=blt
+echo $BACKBONE
+echo $TOKENIZER_NAME
 
 NNODE=1 NGPU=4 LOG_RANK=0 bash train.sh \
   --job.config_file flame/models/fla.toml \
-  --job.dump_folder exp/test \
-  --model.config configs/transformer_340M.json \
-  --model.tokenizer_path /yuchang/lsy_jx/.cache/models/gla-1.3B-100B \
-  --optimizer.name Conda \
+  --job.dump_folder exp/blt_380M_10B_500hash/batch1.seqlen16384.grad_acc8.warmup1024.update1.steps30720.4gpus.lr3e-4 \
+  --model.config configs/blt_transformer_380M.json \
+  --model.tokenizer_path /lisiyuan/jx/.cache/transformer-1.3B-100B \
+  --optimizer.name AdamW \
   --optimizer.eps 1e-15 \
   --optimizer.lr 3e-4 \
   --lr_scheduler.warmup_steps 1024 \
   --lr_scheduler.lr_min 0.1 \
   --lr_scheduler.decay_type cosine \
   --training.batch_size 1 \
-  --training.seq_len 10 \
-  --training.context_len 1024 \
+  --training.seq_len 16384 \
+  --training.context_len 4096 \
   --training.varlen \
-  --training.gradient_accumulation_steps 2 \
+  --training.gradient_accumulation_steps 8 \
   --training.steps 30720 \
   --training.max_norm 1.0 \
   --training.skip_nan_inf \
-  --training.dataset /ssdwork/yuchang/fineweb-edu/sample/100BT \
+  --training.dataset /liziqing/fineweb-edu/sample/100BT \
   --training.dataset_name default \
   --training.dataset_split train \
   --training.num_workers 32 \

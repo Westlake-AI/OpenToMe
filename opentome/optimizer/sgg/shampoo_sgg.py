@@ -89,7 +89,7 @@ class ShampooSGG(Optimizer):    # version 2 of SGG for Shampoo
             betas_1d=betas_1d,
             weight_decay_1d=weight_decay_1d,
         )
-        super().__init__(params, defaults)
+        super(ShampooSGG, self).__init__(params, defaults)
 
         self.global_step = 0
         self.global_median = None

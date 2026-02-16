@@ -34,7 +34,7 @@ class AdafactorSGG(Optimizer):   # version 2 of SGG for Adafactor
                  recluster_interval=recluster_interval,
                  ema_decay_clusters=ema_decay_clusters,
                  ema_decay_scale=ema_decay_scale)
-        super(AdafactorSGG_v2, self).__init__(params, defaults)
+        super(AdafactorSGG, self).__init__(params, defaults)
         self.cluster_models = {}
         self.cpu_buffers = {}  # Pre-allocated CPU buffers
         self.stream = torch.cuda.Stream()  # Separate computation stream

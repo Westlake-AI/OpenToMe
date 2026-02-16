@@ -28,7 +28,7 @@ class AdamWSAC(Optimizer):  # v0807-v0815
 
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay,
                         correct_bias=correct_bias, amsgrad=amsgrad)
-        super().__init__(params, defaults)
+        super(AdamWSAC, self).__init__(params, defaults)
 
         self.model = model
         self.scale_update_freq = scale_update_freq

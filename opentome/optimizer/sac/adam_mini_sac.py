@@ -104,7 +104,7 @@ class Adam_miniSAC(torch.optim.Optimizer):
             optim_groups.append(g)
 
         defaults = dict(lr=lr, beta1=betas[0], beta2=betas[1], eps=eps)
-        super().__init__(optim_groups, defaults)
+        super(Adam_miniSAC, self).__init__(optim_groups, defaults)
 
         # ---- 构建结构层级映射（layer -> block -> param_ids）----
         self.param_to_structure = {}  # id(p) -> {layer_idx, block_name, is_scalable, param_name, group_idx}

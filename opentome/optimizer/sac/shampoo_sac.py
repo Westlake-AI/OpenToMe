@@ -44,7 +44,7 @@ class ShampooSAC(Optimizer):
 
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay,
                         ns_steps=ns_steps)
-        super().__init__(params, defaults)
+        super(ShampooSAC, self).__init__(params, defaults)
 
         self.model = model
         self.scale_update_freq = scale_update_freq

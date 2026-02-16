@@ -280,30 +280,12 @@ def build_optimizers(
         optimizer_kwargs.update({
             "betas": (beta1, beta2),
             "eps": eps,
-            "n_clusters": int(os.environ.get("N_CLUSTERS", "5")),
-            "recluster_interval": int(os.environ.get("UPDATE_ITER", "1000")),
-            "scale_bound": eval(os.environ.get("SCALE_BOUND", "(1, 10.0)")),
-            "beta3": float(os.environ.get("BETA3", "0.9"))
-        })
-    elif name == "AdamWSGG_v2":
-        optimizer_kwargs.update({
-            "betas": (beta1, beta2),
-            "eps": eps,
             "n_clusters": int(os.environ.get("N_CLUSTERS", "3")),
             "recluster_interval": int(os.environ.get("UPDATE_ITER", "1000")),
             "ema_decay_clusters": float(os.environ.get("EMA_DECAY_CLUSTERS", "0.95")),
             "ema_decay_scale": float(os.environ.get("EMA_DECAY_SCALE", "0.9"))
         })
     elif name == "AdafactorSGG":
-        optimizer_kwargs = {
-            "eps": eps,
-            "weight_decay": weight_decay,
-            "n_clusters": int(os.environ.get("N_CLUSTERS", "3")),
-            "recluster_interval": int(os.environ.get("UPDATE_ITER", "1000")),
-            "ema_decay_clusters": float(os.environ.get("EMA_DECAY_CLUSTERS", "0.95")),
-            "ema_decay_scale_factors": float(os.environ.get("EMA_DECAY_SCALE_FACTORS", "0.9"))
-        }
-    elif name == "AdafactorSGG_v2":
         optimizer_kwargs = {
             "eps": eps,
             "weight_decay": weight_decay,
@@ -318,19 +300,10 @@ def build_optimizers(
             "eps": eps,
             "n_clusters": int(os.environ.get("N_CLUSTERS", "2")),
             "recluster_interval": int(os.environ.get("UPDATE_ITER", "1000")),
-            "scale_bound": eval(os.environ.get("SCALE_BOUND", "(1, 10.0)")),
-            "beta3": float(os.environ.get("BETA3", "0.9"))
-        })
-    elif name == "LambSGG_v2":
-        optimizer_kwargs.update({
-            "betas": (beta1, beta2),
-            "eps": eps,
-            "n_clusters": int(os.environ.get("N_CLUSTERS", "2")),
-            "recluster_interval": int(os.environ.get("UPDATE_ITER", "1000")),
             "beta3": float(os.environ.get("BETA3", "0.999")),
             "T_total": int(os.environ.get("TOTAL", "100000"))
         })
-    elif name == "ShampooSGG_v2":
+    elif name == "ShampooSGG":
         optimizer_kwargs = {
             "betas": (beta1, beta2),
             "eps": eps,

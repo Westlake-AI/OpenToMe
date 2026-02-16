@@ -20,7 +20,7 @@ class AdamWSGG(Optimizer):    # version 2 of SGG for AdamW
         defaults = dict(lr=lr, betas=betas, eps=eps, weight_decay=weight_decay,
                         n_clusters=n_clusters, recluster_interval=recluster_interval,
                         ema_decay_clusters=ema_decay_clusters, ema_decay_scale=ema_decay_scale)
-        super(AdamWSGG_v2, self).__init__(params, defaults)
+        super(AdamWSGG, self).__init__(params, defaults)
         self.cluster_models = {}
 
     def step(self, closure=None):
