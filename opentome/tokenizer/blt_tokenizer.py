@@ -311,7 +311,6 @@ class BltTokenizer(Tokenizer):
             token_ids, skip_special_tokens=skip_special_tokens
         )
 
-
     def batch_decode(
         self,
         sequences,

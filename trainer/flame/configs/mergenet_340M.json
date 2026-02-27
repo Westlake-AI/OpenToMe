@@ -1,6 +1,6 @@
 {
     "model_type": "mergenet",
-    "vocab_size": 32000,
+    "vocab_size": 260,
     "hidden_size": 1024,
     "num_local_layers": 6,
     "local_depth": 4,

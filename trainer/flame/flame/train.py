@@ -54,6 +54,9 @@ elif "qwen3_next" in backbone:
 elif "blt" in backbone:
     print("BLT")
     import opentome.models.blt
+elif "mergenet" in backbone:
+    print("MergeNet")
+    import opentome.models.mergenet_nlp
 else:
     print("None")
 # --- Tokenizer & Optimizer --- #
