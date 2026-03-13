@@ -3,7 +3,7 @@
 
 export HF_ENDPOINT=https://hf-mirror.com
 
-DATA_DIR=/yuchang/yk/data
+DATA_DIR=/liziqing/yuhao/yukai/data
 OUTPUT_DIR=./work_dirs/classification
 
 COMMON_ARGS=(

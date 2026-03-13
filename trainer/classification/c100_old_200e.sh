@@ -1,17 +1,16 @@
 #!/bin/bash
-# bash c100_trainer_old.sh 2>&1 | tee train_log_$(date +%Y%m%d_%H%M%S).txt
-# --dtem_window_size None \
+# bash c100_old_200e.sh 2>&1 | tee train_log_$(date +%Y%m%d_%H%M%S).txt
+# Use old HybridToMe implementation, 标准 200 epoch 训练
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 export HF_ENDPOINT=https://hf-mirror.com
-export OPENTOME_MERGENET_IMPL=old
 
 DATA_DIR=/liziqing/yuhao/yukai/data
 OUTPUT_DIR=./work_dirs/classification
-EXP_NAME=cifar100_mergenet_small_swa256_detem32_lr5e4_load_pt_deit_s_full_old
+EXP_NAME=cifar100_mergenet_small_old_200e_local11
 
-
-CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node 1 "${SCRIPT_DIR}/in1k_trainer.py" \
+# Use old HybridToMe implementation, add one extra local block
+OPENTOME_MERGENET_IMPL=old CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node 1 "${SCRIPT_DIR}/in1k_trainer.py" \
   --data_dir ${DATA_DIR} \
   --dataset CIFAR100 \
   --train_split train \
@@ -20,24 +19,21 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node 1 "${SCRIPT_DIR}/i
   --num_classes 100 \
   --img_size 224 \
   --patch_size 8 \
-  --dtem_r 4 \
   --dtem_t 2 \
   --dtem_feat_dim 64 \
   --lambda_local 4.0 \
   --total_merge_latent 0 \
-  --num_local_blocks 1 \
   --use_softkmax \
   --swa_size 256 \
+  --num_local_blocks 1 \
   --batch_size 50 \
   --epochs 200 \
-  --lr 5e-4 \
+  --lr 5e-5 \
+  --lr_local 5e-5 \
   --weight_decay 0.05 \
-  --dtem_window_size 32 \
+  --dtem_window_size 16 \
   --sched cosine \
-  --pretrained \
-  --load_full_pretrained \
-  --pretrained_type deit \
-  --freeze_local_encoder \
+  --clip_grad 1.0 \
   --warmup_epochs 20 \
   --mixup 0.8 \
   --cutmix 1.0 \
@@ -48,5 +44,3 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node 1 "${SCRIPT_DIR}/i
   --output ${OUTPUT_DIR} \
   --experiment ${EXP_NAME} \
   --seed 42 \
-
-#46M 183

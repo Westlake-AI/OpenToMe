@@ -41,12 +41,54 @@ from timm.utils import ApexScaler, NativeScaler
 from fvcore.nn import FlopCountAnalysis
 from fvcore.nn import flop_count_table
 
+from timm.utils.checkpoint_saver import CheckpointSaver as _CheckpointSaver
+
+class CheckpointSaver(_CheckpointSaver):
+    """Fix FileExistsError when checkpoint-N.pth.tar already exists (e.g. from resume)."""
+    def save_checkpoint(self, epoch, metric=None):
+        assert epoch >= 0
+        tmp_save_path = os.path.join(self.checkpoint_dir, 'tmp' + self.extension)
+        last_save_path = os.path.join(self.checkpoint_dir, 'last' + self.extension)
+        self._save(tmp_save_path, epoch, metric)
+        if os.path.exists(last_save_path):
+            os.unlink(last_save_path)
+        os.rename(tmp_save_path, last_save_path)
+        worst_file = self.checkpoint_files[-1] if self.checkpoint_files else None
+        if (len(self.checkpoint_files) < self.max_history
+                or metric is None or self.cmp(metric, worst_file[1])):
+            if len(self.checkpoint_files) >= self.max_history:
+                self._cleanup_checkpoints(1)
+            filename = '-'.join([self.save_prefix, str(epoch)]) + self.extension
+            save_path = os.path.join(self.checkpoint_dir, filename)
+            if os.path.exists(save_path):
+                os.unlink(save_path)
+            os.link(last_save_path, save_path)
+            self.checkpoint_files.append((save_path, metric))
+            self.checkpoint_files = sorted(
+                self.checkpoint_files, key=lambda x: x[1],
+                reverse=not self.decreasing)
+            checkpoints_str = "Current checkpoints:\n"
+            for c in self.checkpoint_files:
+                checkpoints_str += ' {}\n'.format(c)
+            _logger.info(checkpoints_str)
+            if metric is not None and (self.best_metric is None or self.cmp(metric, self.best_metric)):
+                self.best_epoch = epoch
+                self.best_metric = metric
+                best_save_path = os.path.join(self.checkpoint_dir, 'model_best' + self.extension)
+                if os.path.exists(best_save_path):
+                    os.unlink(best_save_path)
+                os.link(last_save_path, best_save_path)
+        return (None, None) if self.best_metric is None else (self.best_metric, self.best_epoch)
+
 USE_OLD_MERGENET = os.getenv("OPENTOME_MERGENET_IMPL", "new").lower() in {"old", "model_old", "legacy"}
+USE_TOME_MERGENET = os.getenv("OPENTOME_MERGENET_IMPL", "new").lower() in {"tome", "model_tome"}
 
 import opentome.models.deit
 from opentome.models.deit.deit import deit_s, deit_s_extend  # Import to register models
 if USE_OLD_MERGENET:
     import opentome.models.mergenet.model_old  # register old HybridToMe models
+elif USE_TOME_MERGENET:
+    import opentome.models.mergenet.model_tome  # register ToME ablation models
 else:
     import opentome.models.mergenet.model  # register new HybridToMe models
 from opentome.utils.dataset_loader import build_dataset
@@ -586,7 +628,7 @@ def main():
         else:
             if args.local_rank == 0:
                 _logger.info("Using native Torch DistributedDataParallel.")
-            model = NativeDDP(model, device_ids=[args.local_rank], broadcast_buffers=not args.no_ddp_bb)
+            model = NativeDDP(model, device_ids=[args.local_rank], broadcast_buffers=not args.no_ddp_bb, find_unused_parameters=True)
         # NOTE: EMA model does not need to be wrapped by DDP
 
     # setup learning rate schedule and starting epoch
@@ -757,6 +799,11 @@ def train_one_epoch(epoch: int,
     model.train()
     all_entropy = []
 
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    total_samples = 0
+    total_time = 0.0
+
     end = time.time()
     last_idx = len(loader) - 1
     num_updates = epoch * len(loader)
@@ -819,7 +866,10 @@ def train_one_epoch(epoch: int,
 
         torch.cuda.synchronize()
         num_updates += 1
-        batch_time_m.update(time.time() - end)
+        batch_time = time.time() - end
+        batch_time_m.update(batch_time)
+        total_time += batch_time
+        total_samples += input.size(0)
         if last_batch or batch_idx % args.log_interval == 0:
             lrl = [param_group['lr'] for param_group in optimizer.param_groups]
             lr = sum(lrl) / len(lrl)
@@ -828,27 +878,13 @@ def train_one_epoch(epoch: int,
                 reduced_loss = reduce_tensor(loss.data, args.world_size)
                 losses_m.update(reduced_loss.item(), input.size(0))
 
-            # 🔍 DEBUG: Run the same batch in eval mode for comparison
-            eval_acc1, eval_acc5 = 0.0, 0.0
-            if (mixup_fn is None or not mixup_fn.mixup_enabled) and args.local_rank == 0:
-                model.eval()
-                with torch.no_grad():
-                    with amp_autocast():
-                        eval_output = model(input)
-                        if isinstance(eval_output, (tuple, list)):
-                            eval_output = eval_output[0]
-                    eval_acc1, eval_acc5 = accuracy(eval_output, target_for_acc, topk=(1, 5))
-                model.train()
-
             if args.local_rank == 0:
-                # Build log message based on whether accuracy is available
                 if mixup_fn is None or not mixup_fn.mixup_enabled:
                     log_msg = (
                         'Train: {} [{:>4d}/{} ({:>3.0f}%)]  '
                         'Loss: {loss.val:#.4g} ({loss.avg:#.3g})  '
                         'Acc@1: {top1.val:>7.3f} ({top1.avg:>7.3f})  '
                         'Acc@5: {top5.val:>7.3f} ({top5.avg:>7.3f})  '
-                        '🔍 EVAL Acc@1: {eval_acc1:>7.3f}  Acc@5: {eval_acc5:>7.3f}  '
                         'Time: {batch_time.val:.3f}s, {rate:>7.2f}/s  '
                         '({batch_time.avg:.3f}s, {rate_avg:>7.2f}/s)  '
                         'LR: {lr:.3e}  '
@@ -859,8 +895,6 @@ def train_one_epoch(epoch: int,
                             loss=losses_m,
                             top1=top1_m,
                             top5=top5_m,
-                            eval_acc1=eval_acc1.item() if isinstance(eval_acc1, torch.Tensor) else eval_acc1,
-                            eval_acc5=eval_acc5.item() if isinstance(eval_acc5, torch.Tensor) else eval_acc5,
                             batch_time=batch_time_m,
                             rate=input.size(0) * args.world_size / batch_time_m.val,
                             rate_avg=input.size(0) * args.world_size / batch_time_m.avg,
@@ -905,14 +939,41 @@ def train_one_epoch(epoch: int,
     if hasattr(optimizer, 'sync_lookahead'):
         optimizer.sync_lookahead()
 
-    # Return metrics (only include accuracy if not using mixup)
+    total_samples = _reduce_value(total_samples, args, torch.distributed.ReduceOp.SUM)
+    total_time = _reduce_value(total_time, args, torch.distributed.ReduceOp.MAX)
+    throughput = total_samples / total_time if total_time > 0 else 0.0
+    mem_allocated_mb, mem_reserved_mb = _get_peak_mem_mb(args)
+
     if mixup_fn is None or not mixup_fn.mixup_enabled:
-        return OrderedDict([('loss', losses_m.avg), ('top1', top1_m.avg), ('top5', top5_m.avg)]), all_entropy
+        metrics = OrderedDict([('loss', losses_m.avg), ('top1', top1_m.avg), ('top5', top5_m.avg)])
     else:
-        return OrderedDict([('loss', losses_m.avg)]), all_entropy
+        metrics = OrderedDict([('loss', losses_m.avg)])
+    metrics['throughput'] = throughput
+    metrics['mem_allocated_mb'] = mem_allocated_mb
+    metrics['mem_reserved_mb'] = mem_reserved_mb
+    return metrics, all_entropy
 
 
 # utils
+def _reduce_value(value, args, op):
+    if args.distributed and torch.distributed.is_available() and torch.distributed.is_initialized():
+        tensor = torch.tensor(value, device=args.device, dtype=torch.float64)
+        torch.distributed.all_reduce(tensor, op=op)
+        return tensor.item()
+    return float(value)
+
+
+def _get_peak_mem_mb(args):
+    if not torch.cuda.is_available():
+        return 0.0, 0.0
+    torch.cuda.synchronize()
+    mem_allocated = torch.cuda.max_memory_allocated()
+    mem_reserved = torch.cuda.max_memory_reserved()
+    mem_allocated = _reduce_value(mem_allocated, args, torch.distributed.ReduceOp.MAX)
+    mem_reserved = _reduce_value(mem_reserved, args, torch.distributed.ReduceOp.MAX)
+    return mem_allocated / (1024 ** 2), mem_reserved / (1024 ** 2)
+
+
 @torch.no_grad()
 def concat_all_gather(tensor):
     """
@@ -935,6 +996,11 @@ def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='')
     top5_m = AverageMeter()
 
     model.eval()
+
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    total_samples = 0
+    total_time = 0.0
 
     end = time.time()
     last_idx = len(loader) - 1
@@ -975,7 +1041,10 @@ def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='')
             top1_m.update(acc1.item(), output.size(0))
             top5_m.update(acc5.item(), output.size(0))
 
-            batch_time_m.update(time.time() - end)
+            batch_time = time.time() - end
+            batch_time_m.update(batch_time)
+            total_time += batch_time
+            total_samples += input.size(0)
             end = time.time()
             if args.local_rank == 0 and (last_batch or batch_idx % args.log_interval == 0):
                 log_name = 'Test' + log_suffix
@@ -988,7 +1057,15 @@ def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='')
                         log_name, batch_idx, last_idx, batch_time=batch_time_m,
                         loss=losses_m, top1=top1_m, top5=top5_m))
 
+    total_samples = _reduce_value(total_samples, args, torch.distributed.ReduceOp.SUM)
+    total_time = _reduce_value(total_time, args, torch.distributed.ReduceOp.MAX)
+    throughput = total_samples / total_time if total_time > 0 else 0.0
+    mem_allocated_mb, mem_reserved_mb = _get_peak_mem_mb(args)
+
     metrics = OrderedDict([('loss', losses_m.avg), ('top1', top1_m.avg), ('top5', top5_m.avg)])
+    metrics['throughput'] = throughput
+    metrics['mem_allocated_mb'] = mem_allocated_mb
+    metrics['mem_reserved_mb'] = mem_reserved_mb
 
     return metrics
 

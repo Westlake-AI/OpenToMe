@@ -1,15 +1,15 @@
 #!/bin/bash
-# bash c100_trainer_old.sh 2>&1 | tee train_log_$(date +%Y%m%d_%H%M%S).txt
-# --dtem_window_size None \
+# HybridToMe lambda=1 完美恢复测试: 预训练微调 CIFAR-100
+# lambda_local=1.0 => total_merge_local=0, 不做任何 token 压缩
+# 预期结果应与纯 DeiT baseline 一致
+# bash c100_finetune_ours_lambda1.sh 2>&1 | tee train_log_ours_lambda1_ft_$(date +%Y%m%d_%H%M%S).txt
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 export HF_ENDPOINT=https://hf-mirror.com
-export OPENTOME_MERGENET_IMPL=old
 
 DATA_DIR=/liziqing/yuhao/yukai/data
 OUTPUT_DIR=./work_dirs/classification
-EXP_NAME=cifar100_mergenet_small_swa256_detem32_lr5e4_load_pt_deit_s_full_old
-
+EXP_NAME=cifar100_hybridtome_small_finetune_lambda1
 
 CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node 1 "${SCRIPT_DIR}/in1k_trainer.py" \
   --data_dir ${DATA_DIR} \
@@ -17,36 +17,26 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node 1 "${SCRIPT_DIR}/i
   --train_split train \
   --val_split val \
   --model hybridtomevit_small_cls \
+  --pretrained \
+  --pretrained_type deit \
   --num_classes 100 \
   --img_size 224 \
   --patch_size 8 \
-  --dtem_r 4 \
-  --dtem_t 2 \
-  --dtem_feat_dim 64 \
-  --lambda_local 4.0 \
+  --lambda_local 1.0 \
   --total_merge_latent 0 \
-  --num_local_blocks 1 \
-  --use_softkmax \
-  --swa_size 256 \
   --batch_size 50 \
-  --epochs 200 \
-  --lr 5e-4 \
+  --epochs 30 \
+  --lr 1e-4 \
+  --lr_local 1e-4 \
   --weight_decay 0.05 \
-  --dtem_window_size 32 \
   --sched cosine \
-  --pretrained \
-  --load_full_pretrained \
-  --pretrained_type deit \
-  --freeze_local_encoder \
-  --warmup_epochs 20 \
-  --mixup 0.8 \
-  --cutmix 1.0 \
+  --warmup_epochs 3 \
+  --mixup 0.0 \
+  --cutmix 0.0 \
   --smoothing 0.1 \
   --aa rand-m9-mstd0.5-inc1 \
   --workers 32 \
   --amp \
   --output ${OUTPUT_DIR} \
   --experiment ${EXP_NAME} \
-  --seed 42 \
-
-#46M 183
+  --seed 42

@@ -2,7 +2,7 @@
 
 import torch
 import torch.nn as nn
-from timm.models.vision_transformer import VisionTransformer
+from timm.models.vision_transformer import VisionTransformer, Block as TimmBlock
 from timm.layers import trunc_normal_
 from timm.models.registry import register_model
 
@@ -136,21 +136,37 @@ class LocalEncoder(nn.Module):
                                      qkv_bias=True, num_classes=0,
                                      drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate)
 
-        # Local Transformer Blocks（全长度 token）
+        # 方案 A: total_merge_local==0 (lambda=1) 时使用标准全局 Block，与 DeiT 预训练权重兼容
+        self.use_global_attn = total_merge_local == 0
+
         dpr = torch.linspace(0, drop_path_rate, local_depth).tolist()
-        self.vit.blocks = nn.ModuleList([
-            LocalBlock(
-                dim=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=True,
-                attn_drop=attn_drop_rate,
-                proj_drop=drop_rate,
-                drop_path=dpr[i],
-                local_window=local_block_window,
-            )
-            for i in range(local_depth)
-        ])
+        if self.use_global_attn:
+            self.vit.blocks = nn.ModuleList([
+                TimmBlock(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=True,
+                    attn_drop=attn_drop_rate,
+                    proj_drop=drop_rate,
+                    drop_path=dpr[i],
+                )
+                for i in range(local_depth)
+            ])
+        else:
+            self.vit.blocks = nn.ModuleList([
+                LocalBlock(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=True,
+                    attn_drop=attn_drop_rate,
+                    proj_drop=drop_rate,
+                    drop_path=dpr[i],
+                    local_window=local_block_window,
+                )
+                for i in range(local_depth)
+            ])
 
         # DTEM metric head（每层一个）
         self.metric_dim = self._resolve_metric_dim(embed_dim, num_heads, dtem_feat_dim)
@@ -203,18 +219,18 @@ class LocalEncoder(nn.Module):
         B, N, C = x.shape
         device = x.device
 
-        # Memory-saving path: avoid materializing (B, N, width, C)
-        summed = torch.zeros_like(x)
+        # Vectorized: avoid Python for-loop over width (major speed bottleneck)
         base_positions = torch.arange(N, device=device)
-        for offset in range(width):
-            pos = base_positions + (offset - center)
-            valid = (pos >= 0) & (pos < N)
-            pos_clamped = pos.clamp(0, N - 1)
-            gathered = x[:, pos_clamped, :]  # (B, N, C)
-            weight = source_matrix[:, :, offset]
-            if not valid.all():
-                weight = weight * valid.to(x.dtype)
-            summed = summed + gathered * weight.unsqueeze(-1)
+        pos_offsets = torch.arange(width, device=device, dtype=torch.long) - center
+        pos_all = base_positions.unsqueeze(1) + pos_offsets.unsqueeze(0)  # (N, width)
+        pos_clamped = pos_all.clamp(0, N - 1)
+        valid = (pos_all >= 0) & (pos_all < N)  # (N, width)
+
+        weight = source_matrix * valid.to(x.dtype).unsqueeze(0)  # (B, N, width)
+        index = pos_clamped.unsqueeze(0).unsqueeze(-1).expand(B, N, width, C).long()
+        x_expanded = x.unsqueeze(2).expand(-1, -1, width, -1)  # (B, N, width, C)
+        gathered = torch.gather(x_expanded, 1, index)  # (B, N, width, C)
+        summed = (gathered * weight.unsqueeze(-1)).sum(dim=2)  # (B, N, C)
 
         if size is not None:
             denom = size.squeeze(-1).clamp(min=1e-6).unsqueeze(-1)
@@ -602,8 +618,6 @@ class HybridToMeModel(nn.Module):
         x_local, x_embed, size_local, info_local = self.local(x)
         source_matrix = info_local.get("source_matrix", None) # [B, N, width], width = 2 * window_size * local_depth + 1
         
-        # Compute center of mass for each token based on source_matrix
-        # 🔧 FIX: 使用 torch.no_grad() 避免将 source_matrix 计算拉入梯度图
         if source_matrix is not None:
             with torch.no_grad():
                 center = info_local["source_matrix_center"]
@@ -611,17 +625,13 @@ class HybridToMeModel(nn.Module):
                 B_sm, N_sm = source_matrix.shape[0], source_matrix.shape[1]
                 i_positions = torch.arange(N_sm, device=device).unsqueeze(0).expand(B_sm, -1)  # (B, N)
                 offset_relative = torch.arange(width, device=device, dtype=torch.float32) - center  # (width,)
-                
-                # Weighted relative offset: source_matrix * (offset - center)
                 weighted_offset = (source_matrix * offset_relative.view(1, 1, -1)).sum(dim=-1)  # (B, N)
-                
-                # Center of mass = current position + weighted offset / size
-                # 🔧 使用 detach() 避免 size_local 的梯度传播到这里
                 token_center_of_mass = i_positions.float() + weighted_offset / size_local[..., 0].detach().clamp(min=1e-6)
-            
-            # Store in info_local
             info_local["token_center_of_mass"] = token_center_of_mass  # (B, N)
-        
+        else:
+            N_tokens = x_local.shape[1]
+            info_local["token_center_of_mass"] = torch.arange(N_tokens, device=device).float().unsqueeze(0).expand(B, -1)
+
         center_of_mass = info_local["token_center_of_mass"] # [B, N]
         k = L_full - info_local["total_merge"] - 1
         token_strength = size_local[..., 0] 
@@ -645,60 +655,33 @@ class HybridToMeModel(nn.Module):
 
         size_trace = topk_size
         
-        # 构建 attention bias: log(source_matrix) 作为先验
-        # 形状: [B, k+1, L_full]
-        # 🔧 FIX: bias 构建过程用 torch.no_grad() 并 detach()，避免保留巨大计算图
-        with torch.no_grad():
-            center = info_local["source_matrix_center"]
-            width = info_local["source_matrix_width"]
-            
-            # 初始化 bias 为大负数（表示不能 attend）
-            bias = torch.full((B, k+1, L_full), -1e10, device=device, dtype=x_local.dtype)
-            
-            # cls token（第 0 行）不设 bias，可以 attend 所有位置
-            bias[:, 0, :] = 0.0
-            
-            # 获取 topk tokens 在 x_local 中的实际索引（+1 因为 cls token）
-            actual_indices = sorted_topk_indices + 1  # [B, k]
-            
-            # 从 source_matrix 中提取对应行
-            # source_matrix: [B, N, width] -> source_for_topk: [B, k, width]
-            source_for_topk = torch.gather(
-                source_matrix, 
-                1, 
-                actual_indices.unsqueeze(-1).expand(-1, -1, width)
-            )  # [B, k, width]
-            
-            # 计算每个 offset 对应的原序列位置
-            # j = actual_indices[b, i] + (offset - center)
-            offset_range = torch.arange(width, device=device).view(1, 1, -1)  # [1, 1, width]
-            j_positions = actual_indices.unsqueeze(-1) + (offset_range - center)  # [B, k, width]
-            
-            # 合法性检查
-            valid_mask = (j_positions >= 0) & (j_positions < L_full)  # [B, k, width]
-            
-            # 对 source 值取 log，零值或极小值保持为 -1e10
-            log_source = torch.where(
-                source_for_topk > 1e-10,
-                torch.log(source_for_topk.clamp(min=1e-10)),
-                torch.full_like(source_for_topk, -1e10)
-            )  # [B, k, width]
-            
-            # 矢量化 scatter：将 log_source 填充到 bias 的对应位置
-            # 对于无效位置，保持 -1e10（不改变 bias）
-            log_source_masked = torch.where(valid_mask, log_source, torch.full_like(log_source, -1e10))
-            
-            # 将无效的 j_positions clamp 到 0（防止索引错误）
-            j_positions_safe = torch.where(valid_mask, j_positions, torch.zeros_like(j_positions))
-            
-            # 使用 scatter_ 在最后一个维度上更新 bias[:, 1:, :]
-            bias[:, 1:, :].scatter_(2, j_positions_safe, log_source_masked)
-        
-        # # Down Sample
-        # x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias)
+        if source_matrix is not None:
+            with torch.no_grad():
+                center = info_local["source_matrix_center"]
+                width = info_local["source_matrix_width"]
+                bias = torch.full((B, k+1, L_full), -1e10, device=device, dtype=x_local.dtype)
+                bias[:, 0, :] = 0.0
+                actual_indices = sorted_topk_indices + 1  # [B, k]
+                source_for_topk = torch.gather(
+                    source_matrix, 1,
+                    actual_indices.unsqueeze(-1).expand(-1, -1, width)
+                )  # [B, k, width]
+                offset_range = torch.arange(width, device=device).view(1, 1, -1)  # [1, 1, width]
+                j_positions = actual_indices.unsqueeze(-1) + (offset_range - center)  # [B, k, width]
+                valid_mask = (j_positions >= 0) & (j_positions < L_full)  # [B, k, width]
+                log_source = torch.where(
+                    source_for_topk > 1e-10,
+                    torch.log(source_for_topk.clamp(min=1e-10)),
+                    torch.full_like(source_for_topk, -1e10)
+                )  # [B, k, width]
+                log_source_masked = torch.where(valid_mask, log_source, torch.full_like(log_source, -1e10))
+                j_positions_safe = torch.where(valid_mask, j_positions, torch.zeros_like(j_positions))
+                bias[:, 1:, :].scatter_(2, j_positions_safe, log_source_masked)
+        else:
+            bias = torch.zeros((B, k+1, L_full), device=device, dtype=x_local.dtype)
+
         x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias) + topk_x
 
-        # 阶段3：LatentEncoder（ToMe硬合并）
         x_latent, size_latent, info_latent = self.latent(x_trace, size_trace)
         token_map_tome = info_latent.get("source_map", None)
         x_restore_tome = token_unmerge_from_map(x_latent, token_map_tome)
@@ -740,14 +723,15 @@ class CLSHybridToMeModel(HybridToMeModel):
                 offset_relative = torch.arange(width, device=device, dtype=torch.float32) - center  # (width,)
                 weighted_offset = (source_matrix * offset_relative.view(1, 1, -1)).sum(dim=-1)  # (B, N)
                 token_center_of_mass = i_positions.float() + weighted_offset / size_local[..., 0].detach().clamp(min=1e-6)
-            
-            # Store in info_local
             info_local["token_center_of_mass"] = token_center_of_mass  # (B, N)
-        
+        else:
+            N_tokens = x_local.shape[1]
+            info_local["token_center_of_mass"] = torch.arange(N_tokens, device=device).float().unsqueeze(0).expand(B, -1)
+
         center_of_mass = info_local["token_center_of_mass"] # [B, N]
         k = L_full - info_local["total_merge"] - 1
-        token_strength = size_local[..., 0] 
-        token_strength_no_cls = token_strength[:,1:]  
+        token_strength = size_local[..., 0]
+        token_strength_no_cls = token_strength[:,1:]
         if k <= 0 or k > token_strength_no_cls.shape[1]:
             k = token_strength_no_cls.shape[1]
         
@@ -763,38 +747,42 @@ class CLSHybridToMeModel(HybridToMeModel):
         topk_size = torch.cat([size_local[:, :1, 0], topk_size_trace.squeeze(-1)], dim=-1).unsqueeze(-1)
 
         size_trace = topk_size
-        with torch.no_grad():
-            center = info_local["source_matrix_center"]
-            width = info_local["source_matrix_width"]
-            bias = torch.full((B, k+1, L_full), -1e10, device=device, dtype=x_local.dtype)
-            
-            bias[:, 0, :] = 0.0
+        if source_matrix is not None:
+            with torch.no_grad():
+                center = info_local["source_matrix_center"]
+                width = info_local["source_matrix_width"]
+                bias = torch.full((B, k+1, L_full), -1e10, device=device, dtype=x_local.dtype)
+                
+                bias[:, 0, :] = 0.0
 
-            actual_indices = sorted_topk_indices + 1  # [B, k]
+                actual_indices = sorted_topk_indices + 1  # [B, k]
 
-            source_for_topk = torch.gather(
-                source_matrix, 
-                1, 
-                actual_indices.unsqueeze(-1).expand(-1, -1, width)
-            )  # [B, k, width]
-            
-            offset_range = torch.arange(width, device=device).view(1, 1, -1)  # [1, 1, width]
-            j_positions = actual_indices.unsqueeze(-1) + (offset_range - center)  # [B, k, width]
-            
-            valid_mask = (j_positions >= 0) & (j_positions < L_full)  # [B, k, width]
-            log_source = torch.where(
-                source_for_topk > 1e-10,
-                torch.log(source_for_topk.clamp(min=1e-10)),
-                torch.full_like(source_for_topk, -1e10)
-            )  # [B, k, width]
-            log_source_masked = torch.where(valid_mask, log_source, torch.full_like(log_source, -1e10))
-            j_positions_safe = torch.where(valid_mask, j_positions, torch.zeros_like(j_positions))
-            bias[:, 1:, :].scatter_(2, j_positions_safe, log_source_masked)
+                source_for_topk = torch.gather(
+                    source_matrix, 
+                    1, 
+                    actual_indices.unsqueeze(-1).expand(-1, -1, width)
+                )  # [B, k, width]
+                
+                offset_range = torch.arange(width, device=device).view(1, 1, -1)  # [1, 1, width]
+                j_positions = actual_indices.unsqueeze(-1) + (offset_range - center)  # [B, k, width]
+                
+                valid_mask = (j_positions >= 0) & (j_positions < L_full)  # [B, k, width]
+                log_source = torch.where(
+                    source_for_topk > 1e-10,
+                    torch.log(source_for_topk.clamp(min=1e-10)),
+                    torch.full_like(source_for_topk, -1e10)
+                )  # [B, k, width]
+                log_source_masked = torch.where(valid_mask, log_source, torch.full_like(log_source, -1e10))
+                j_positions_safe = torch.where(valid_mask, j_positions, torch.zeros_like(j_positions))
+                bias[:, 1:, :].scatter_(2, j_positions_safe, log_source_masked)
+        else:
+            bias = torch.zeros((B, k+1, L_full), device=device, dtype=x_local.dtype)
         
-        # Down Sample
-        # print('topk_x', topk_x.shape, 'x_embed', x_embed.shape)
-        # x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias)
-        x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias) + topk_x
+        # 方案 A 续: lambda=1 且 total_merge_latent=0 时绕过 cross attention，保持 block3→block4 与 DeiT 一致
+        if self.total_merge_local == 0 and self.total_merge_latent == 0:
+            x_trace = topk_x
+        else:
+            x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias) + topk_x
 
         x_latent, size_latent, info_latent = self.latent(x_trace, size_trace)
         # print('x_latent', x_latent.shape, 'size_latent', size_latent.shape)
