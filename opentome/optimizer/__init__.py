@@ -34,12 +34,15 @@ from .apollo import APOLLO_AdamW
 from .came import CAME, GradientProjector as CAMEGradientProjector
 from .conda import Conda, CondaProjector
 from .lion import Lion
+from .moga import MOGASGD
 from .mars import MARS
 from .muon import Muon
 from .nadam import NAdam
 from .radam import RAdam, PlainRAdam, AdamW as RAdamW
 from .sophia import SophiaG
 from .soap import SOAP
+from .scale import SCALE
+from .rmnp import RMNP
 
 __all__ = [
     # SGG Optimizers
@@ -51,7 +54,7 @@ __all__ = [
     # Standard & Third-party Optimizers
     'Adam_mini', 'NAdam', 'RAdam', 'PlainRAdam', 'RAdamW', 'Lamb', 'Shampoo',
     'GaLore_AdamW', 'GaLoreProjector', 'GradientProjector', 'CAMEGradientProjector', 'CondaProjector',
-    'Adan', 'APOLLO_AdamW','CAME', 'Conda', 'Lion', 'MARS', 'Muon', 'SophiaG', 'SOAP',
+    'Adan', 'APOLLO_AdamW','CAME', 'Conda', 'Lion', 'MOGASGD', 'MARS', 'Muon', 'SophiaG', 'SOAP', 'SCALE', 'RMNP'
 ]
 
 
@@ -69,6 +72,7 @@ SAC_OPTIMIZERS = [
 STANDARD_OPTIMIZERS = [
     'Adam_mini', 'Lamb', 'Shampoo', 'Adan', 'APOLLO_AdamW', 'Lion',
     'MARS', 'Muon', 'NAdam', 'RAdam', 'PlainRAdam', 'SophiaG', 'SOAP',
+    'SCALE', 'MOGASGD', 'RMNP'
 ]
 
 # Gradient compression and low-rank optimizers

@@ -68,7 +68,6 @@ else:
     from opentome.utils.optimization import build_optimizers
 print(f"Tokenizer name: {tokenizer_name}")
 print(f"Optimizer: {default_opt}")
-# from ipdb import set_trace as point
 from opentome.tokenizer.build_tokenizer import TokenizerArgs
 print("*" * 50)
 # ------ End of jinxin added ------ #
@@ -320,13 +319,17 @@ def main(job_config: JobConfig):
 
     # build optimizer after applying parallelisms to the model
     if default_opt == "Muon":
-        muon_params = [
-            p for name, p in model.named_parameters() if p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
-        ]
-        adamw_params = [
-            p for name, p in model.named_parameters() if not (p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name)
-        ]
-        optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager, muon_params, adamw_params)
+        from opentome.utils.optimization import build_muon_metrics
+        metrics = build_muon_metrics(model)
+        optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager, metrics)
+    elif default_opt == "SCALE":
+        from opentome.utils.optimization import build_scale_metrics
+        metrics = build_scale_metrics(model)
+        optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager, metrics)
+    elif default_opt == "RMNP":
+        from opentome.utils.optimization import build_rmnp_metrics
+        metrics = build_rmnp_metrics(model)
+        optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager, metrics)
     else:
         optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager)
     lr_schedulers = train_spec.build_lr_schedulers_fn(optimizers, job_config)

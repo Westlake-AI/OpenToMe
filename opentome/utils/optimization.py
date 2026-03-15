@@ -31,7 +31,8 @@ except ImportError as e:
 try:   # Standard & Third-party Optimizers
     from opentome.optimizer import (
         Adam_mini, Lamb, Shampoo, GaLore_AdamW, CAME, Conda,
-        Adan, APOLLO_AdamW, Lion, MARS, Muon, NAdam, RAdam, SophiaG, SOAP
+        Adan, APOLLO_AdamW, Lion, MARS, Muon, NAdam, RAdam, SophiaG, SOAP, SCALE, MOGASGD,
+        RMNP
     )
     standard_optimizers_available = True
 except ImportError as e:
@@ -225,8 +226,7 @@ def build_optimizers(
     model_parts: list[nn.Module],
     job_config: JobConfig,
     ft_manager: FTManager,
-    muon_params = None,
-    adamw_params = None,
+    metrics: dict = None
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
@@ -358,12 +358,12 @@ def build_optimizers(
             "eps": eps,
         })
     elif name == "Muon":
-        assert muon_params is not None and adamw_params is not None, "Muon optimizer requires both muon_params and adamw_params"
+        assert metrics["muon_params"] is not None and metrics["adamw_params"] is not None, "Muon optimizer requires both muon_params and adamw_params"
         optimizer_kwargs.update({
-            "muon_params": muon_params,
+            "muon_params": metrics["muon_params"],
             "nesterov": True,
             "ns_steps": 5,
-            "adamw_params": adamw_params,
+            "adamw_params": metrics["adamw_params"],
             "adamw_betas": (beta1, beta2),
             "adamw_eps": eps,
         })
@@ -373,16 +373,24 @@ def build_optimizers(
             "eps": eps,
         })
     elif name == "MARS":
+        lr_1d = float(os.environ.get("LR_1D", lr))
+        mars_type = os.environ.get("MARS_TYPE", "mars-adamw")
+        beta1_1d = float(os.environ.get("BETA1_1D", beta1))
+        beta2_1d = float(os.environ.get("BETA2_1D", beta2))
+        assert lr_1d > 0, "LR_1D must be greater than 0"
+        assert beta1_1d > 0 and beta1_1d < 1, "BETA1_1D must be between 0 and 1"
+        assert beta2_1d > 0 and beta2_1d < 1, "BETA2_1D must be between 0 and 1"
+        
         optimizer_kwargs.update({
             "betas": (beta1, beta2),
             "eps": eps,
             "gamma": 0.025,
-            "lr_1d": lr,
+            "lr_1d": lr_1d,
             "is_approx": True,
-            "mars_type": "mars-adamw",
+            "mars_type": mars_type,
             "optimize_1d": False,
             "weight_decay_1d": weight_decay,
-            "betas_1d": (beta1, beta2)
+            "betas_1d": (beta1_1d, beta2_1d)
         })
     elif name == "Adan":
         optimizer_kwargs.update({
@@ -396,6 +404,45 @@ def build_optimizers(
     elif name == "Lion":
         optimizer_kwargs = {
             "betas": (beta1, beta2),
+        }
+    elif name == "MOGASGD":
+        optimizer_kwargs = {
+            "eps": eps,
+            "momentum": 0.9,
+            "weight_decay": weight_decay,
+            "nesterov_mom": 0.0,
+            "max_grad_norm": 1.0,
+            "p_exp": 2.0,
+            "q_exp": torch.inf,
+            "use_fan_scaling": True,
+        }
+    elif name == "SCALE":
+        adam_lr = float(os.environ.get("ADAM_LR", lr))
+        assert adam_lr > 0, "ADAM_LR must be greater than 0"
+        optimizer_kwargs = {
+            "weight_decay": weight_decay,
+            "main_params": metrics["main_params"],
+            "secondary_params": metrics["secondary_params"],
+            "oned_params": metrics["oned_params"],
+            "id_to_name": metrics["id_to_name"],
+            "debug": False,
+            "momentum": 0.9,
+            "adam_lr": adam_lr,
+            "adamw_betas": (beta1, beta2),
+            "adamw_eps": eps, 
+        }
+    elif name == "RMNP":
+        adam_lr = float(os.environ.get("ADAM_LR", lr))
+        assert adam_lr > 0, "ADAM_LR must be greater than 0"
+        optimizer_kwargs = {
+            "rmnp_params": metrics["rmnp_params"],
+            "adam_params": metrics["adam_params"],
+            "lr_adam": adam_lr,
+            "weight_decay": weight_decay,
+            "momentum": 0.95,
+            "beta": 0.95,
+            "betas": (beta1, beta2),
+            "eps": eps,
         }
     elif name in ["GaLore_AdamW", "CAME", "Conda", "APOLLO_AdamW"]:
         optimizer_kwargs.update({
@@ -457,7 +504,8 @@ def build_optimizers(
             "GaLore_AdamW": GaLore_AdamW, "CAME": CAME, "Conda": Conda,
             "Adan": Adan, "APOLLO_AdamW": APOLLO_AdamW, "Lion": Lion,
             "MARS": MARS, "Muon": Muon, "NAdam": NAdam, "RAdam": RAdam,
-            "SophiaG": SophiaG, "SOAP": SOAP,
+            "SophiaG": SophiaG, "SOAP": SOAP, "SCALE": SCALE, "MOGASGD": MOGASGD,
+            "RMNP": RMNP,
         }
         optimizer_classes.update(standard_optimizer_classes)
         logger.info(f"Standard optimizers loaded: {list(standard_optimizer_classes.keys())}")
@@ -516,3 +564,76 @@ def build_optimizers(
         )
     else:
         return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
+
+
+def build_muon_metrics(model):
+    muon_params = [
+        p for name, p in model.named_parameters() if p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
+    ]
+    adamw_params = [
+        p for name, p in model.named_parameters() if not (p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name)
+    ]
+    metrics = {
+        "muon_params": muon_params,
+        "adamw_params": adamw_params,
+    }
+    return metrics
+
+
+def build_scale_metrics(model):
+    from torch import nn
+    main_params, secondary_params, oned_params = [], [], []
+    main_modules_list = ["attn", "mlp","attention", "embed_tokens"]
+    print(f"MAIN MODULES = {main_modules_list} !")
+
+    id_to_name_main_params, id_to_name_secondary_params, id_to_name_oned_params = {}, {}, {}
+
+    for module_name, module in model.named_modules():
+        if not (isinstance(module, nn.Linear) or isinstance(module, nn.Embedding)):
+            continue
+        if not any(target_key in module_name for target_key in main_modules_list): 
+            continue
+        main_params.append(module.weight)
+        id_to_name_main_params[id(module.weight)] = module_name
+        
+    for param_name, p in model.named_parameters():
+        if id(p) in id_to_name_main_params:
+            continue
+        if p.ndim == 1:
+            oned_params.append(p)
+            id_to_name_oned_params[id(p)] = param_name
+        else:
+            secondary_params.append(p)
+            id_to_name_secondary_params[id(p)] = param_name
+
+    for module_name, module in model.named_modules():
+        if hasattr(module, 'weight'):
+            p = module.weight
+            if id(p) in id_to_name_main_params:
+                print("Main module: ", module_name)
+            if id(p) in id_to_name_oned_params:    
+                print("1D module: ", module_name)    
+            if id(p) in id_to_name_secondary_params:    
+                print("Secondary module: ", module_name)          
+    metrics = {
+        "main_params": main_params,
+        "secondary_params": secondary_params,
+        "oned_params": oned_params,
+        "id_to_name": {**id_to_name_main_params, **id_to_name_secondary_params, **id_to_name_oned_params},
+    }
+    return metrics
+
+
+def build_rmnp_metrics(model):
+    rmnp_params, adam_params = [], []
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            if param.ndim >= 2 and 'embed' not in name and 'lm_head' not in name:
+                rmnp_params.append(param)
+            else:
+                adam_params.append(param)
+    metrics = {
+        "rmnp_params": rmnp_params,
+        "adam_params": adam_params,
+    }
+    return metrics

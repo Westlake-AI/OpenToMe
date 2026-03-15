@@ -199,8 +199,6 @@ def tome_apply_patch(
         if isinstance(module, (Block, TimmBlock)):
             module.__class__ = ToMeBlock
             module._tome_info = model._tome_info
-            # print("ToMeBlock")
-            # print(f"module._tome_info: {module._tome_info}")
         elif isinstance(module, (Attention, TimmAttention)):
             module.__class__ = ToMeAttention
             module._tome_info = model._tome_info

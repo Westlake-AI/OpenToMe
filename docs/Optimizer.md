@@ -132,6 +132,48 @@ name = "Adam_mini"
 ### Shampoo & Muon
 **[TODO]**, they should modify depend on the different models.
 
+### MOGA (MOGASGD) 配置
+MOGA 在代码中对应优化器名 `MOGASGD`，属于标准/第三方优化器类别，用于对梯度进行行归一化并结合动量与解耦权重衰减。
+
+该优化器目前**不依赖额外环境变量**，只需要在 `.toml` 中配置基础超参数即可：
+
+```bash
+[optimizer]
+name = "MOGASGD"
+lr = 0.1                # 可根据任务调整
+weight_decay = 0.01     # 可根据任务调整
+```
+
+其余超参数（如 `momentum=0.9`、`nesterov_mom=0.0`、`max_grad_norm=1.0`、`p_exp=1.0`、`q_exp=inf` 等）在实现中有合理缺省值，当前版本不通过环境变量暴露。
+
+### SCALE 优化器配置
+SCALE 在代码中对应优化器名 `SCALE`，用于对主干矩阵参数做列归一化更新，并对一维参数（如 bias、LayerNorm 参数等）使用类 AdamW 方式单独更新。
+
+#### 环境变量
+
+```bash
+# 控制一维参数上使用的 AdamW 学习率（可选）
+export ADAM_LR=1e-4      # 若不设置，则 ADAM_LR 默认为 lr
+```
+
+#### 使用示例
+
+```bash
+# 在 .toml 配置文件中
+[optimizer]
+name = "SCALE"
+lr = 1e-3                # SCALE 主学习率（作用在主/次要矩阵参数上）
+weight_decay = 0.01
+```
+
+在基于 `flame/train.py` 的训练脚本中，如果希望使用 SCALE 的专用参数分组逻辑（自动区分 attention/MLP/embed 等主参数与其他参数），还需要在启动训练时设置：
+
+```bash
+export DEFAULT_OPT="SCALE"
+```
+
+这样系统会调用 `build_scale_metrics` 自动从模型中抽取 `main_params`、`secondary_params` 和 `oned_params`，并将它们传入 SCALE 优化器。
+
 ## 完整示例脚本
 
 ```bash
