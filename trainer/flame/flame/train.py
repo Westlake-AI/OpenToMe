@@ -7,6 +7,13 @@
 import json
 import os
 import time
+
+# Per-rank Triton/Inductor cache. Shared /tmp/triton_cache_* under DDP + torch.compile
+# races in torch._inductor (FileExistsError on os.replace); set before import torch.
+_lr_triton = os.environ.get("LOCAL_RANK")
+if _lr_triton is not None:
+    _td = os.environ.get("TRITON_CACHE_DIR", "/tmp/triton_inductor")
+    os.environ["TRITON_CACHE_DIR"] = f"{_td}_r{_lr_triton}"
 from datetime import timedelta
 
 import fla  # noqa
@@ -318,18 +325,23 @@ def main(job_config: JobConfig):
     )
 
     # build optimizer after applying parallelisms to the model
-    if default_opt == "Muon":
-        from opentome.utils.optimization import build_muon_metrics
-        metrics = build_muon_metrics(model)
-        optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager, metrics)
-    elif default_opt == "SCALE":
+    # SCALE / RMNP need precomputed parameter groups; Muon uses local opentome/optimizer/muon.py
+    # (param split inside Muon.__init__, not build_muon_metrics).
+    metric_model = model_parts[0]
+    if default_opt == "SCALE":
         from opentome.utils.optimization import build_scale_metrics
-        metrics = build_scale_metrics(model)
-        optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager, metrics)
+
+        metrics = build_scale_metrics(metric_model)
+        optimizers = train_spec.build_optimizers_fn(
+            model_parts, job_config, ft_manager, metrics=metrics
+        )
     elif default_opt == "RMNP":
         from opentome.utils.optimization import build_rmnp_metrics
-        metrics = build_rmnp_metrics(model)
-        optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager, metrics)
+
+        metrics = build_rmnp_metrics(metric_model)
+        optimizers = train_spec.build_optimizers_fn(
+            model_parts, job_config, ft_manager, metrics=metrics
+        )
     else:
         optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager)
     lr_schedulers = train_spec.build_lr_schedulers_fn(optimizers, job_config)

@@ -20,7 +20,7 @@ from .svd_projector import GaLoreProjector
 from .random_projector import GradientProjector
 
 
-class APOLLO_AdamW(Optimizer):
+class AdamW(Optimizer):
     """
     Implements Adam algorithm with weight decay fix as introduced in [Decoupled Weight Decay
     Regularization](https://arxiv.org/abs/1711.05101).
@@ -53,6 +53,12 @@ class APOLLO_AdamW(Optimizer):
         scale_front: bool = False,
         disable_nl: bool = False,
         no_deprecation_warning: bool = True,
+        rank: int = 256,
+        update_proj_gap: int = 200,
+        scale: float = 1.0,
+        proj_type: str = "std",
+        scale_type: str = "channel",
+        proj: str = "random",
     ):
         if not no_deprecation_warning:
             warnings.warn(
@@ -70,11 +76,14 @@ class APOLLO_AdamW(Optimizer):
             raise ValueError(f"Invalid beta parameter: {betas[1]} - should be in [0.0, 1.0)")
         if not 0.0 <= eps:
             raise ValueError(f"Invalid epsilon value: {eps} - should be >= 0.0")
-        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias}
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias,
+                    "rank": rank, "update_proj_gap": update_proj_gap, "scale": scale, "proj_type": proj_type,
+                    "scale_type": scale_type, "proj": proj}
         super().__init__(params, defaults)
 
         self.scale_front = scale_front
         self.disable_nl = disable_nl
+        self._projectors = {}
 
         params_idx = 0
         for group in self.param_groups:
@@ -128,12 +137,11 @@ class APOLLO_AdamW(Optimizer):
                 if "step" not in state:
                     state["step"] = 0
 
-                # APOLLO Step 1: Calculate gradient into low rank space.
-                if "rank" in group:
-                    norm_dim = 0 if grad.shape[0] < grad.shape[1] else 1 # low-rank dimension
-                    if "projector" not in state:
-                        state["projector"] = self._initialize_projector(group, state)
-                    grad = state["projector"].project(grad, state["step"])
+                # APOLLO Step 1: Calculate gradient into low rank space (2D params with sufficient dims).
+                if "rank" in group and grad.ndim >= 2 and min(grad.shape) > group["rank"]:
+                    if p not in self._projectors:
+                        self._projectors[p] = self._initialize_projector(group, state)
+                    grad = self._projectors[p].project(grad, state["step"])
 
                 # State initialization
                 if "exp_avg" not in state:
@@ -164,7 +172,8 @@ class APOLLO_AdamW(Optimizer):
                 norm_grad = exp_avg / denom
 
                 # APOLLO Step 3: Obtain approximated gradient scaling factor, channel-wise or tensor-wise.
-                if "rank" in group:
+                if "rank" in group and p.grad is not None and p.grad.ndim >= 2 and min(p.grad.shape) > group["rank"]:
+                    norm_dim = 0 if p.grad.shape[0] < p.grad.shape[1] else 1
                     if group['scale_type'] == 'channel':
                         grad_scaling_factor = (
                             torch.norm(norm_grad, dim=norm_dim) /

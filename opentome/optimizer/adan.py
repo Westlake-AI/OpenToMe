@@ -53,7 +53,7 @@ class Adan(Optimizer):
                  weight_decay=0.0,
                  max_grad_norm=0.0,
                  no_prox=False,
-                 foreach: bool = False):
+                 foreach: bool = True):
         if not 0.0 <= max_grad_norm:
             raise ValueError('Invalid Max grad norm: {}'.format(max_grad_norm))
         if not 0.0 <= lr:

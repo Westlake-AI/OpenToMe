@@ -123,3 +123,15 @@ results
 *.pdf
 
 trainer/flame/exp
+
+# experiment directories
+exp/
+exp_ablation_muon/
+
+# local docs (not for upstream)
+docs/experiment_config_quick_reference.md
+docs/muon_ablation_migration_plan.md
+docs/opentome_fla_complete_guide.md
+docs/opentome_vs_sac_comparison.md
+docs/optimizer_verification.md
+docs/training_data_architecture_guide.md

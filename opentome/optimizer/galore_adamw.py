@@ -12,7 +12,7 @@ from transformers.utils.versions import require_version
 from .svd_projector import GaLoreProjector
 
 
-class GaLore_AdamW(Optimizer):
+class AdamW(Optimizer):
     """
     Implements Adam algorithm with weight decay fix as introduced in [Decoupled Weight Decay
     Regularization](https://arxiv.org/abs/1711.05101).
@@ -43,6 +43,10 @@ class GaLore_AdamW(Optimizer):
         weight_decay: float = 0.0,
         correct_bias: bool = True,
         no_deprecation_warning: bool = True,
+        rank: int = 256,
+        update_proj_gap: int = 200,
+        scale: float = 0.25,
+        proj_type: str = "std",
     ):
         if not no_deprecation_warning:
             warnings.warn(
@@ -60,8 +64,10 @@ class GaLore_AdamW(Optimizer):
             raise ValueError(f"Invalid beta parameter: {betas[1]} - should be in [0.0, 1.0)")
         if not 0.0 <= eps:
             raise ValueError(f"Invalid epsilon value: {eps} - should be >= 0.0")
-        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias}
+        defaults = {"lr": lr, "betas": betas, "eps": eps, "weight_decay": weight_decay, "correct_bias": correct_bias,
+                    "rank": rank, "update_proj_gap": update_proj_gap, "scale": scale, "proj_type": proj_type}
         super().__init__(params, defaults)
+        self._projectors = {}
 
     @torch.no_grad()
     def step(self, closure: Callable = None):
@@ -88,12 +94,12 @@ class GaLore_AdamW(Optimizer):
                 if "step" not in state:
                     state["step"] = 0
 
-                # GaLore Projection
-                if "rank" in group:
-                    if "projector" not in state:
-                        state["projector"] = GaLoreProjector(group["rank"], update_proj_gap=group["update_proj_gap"], scale=group["scale"], proj_type=group["proj_type"])
+                # GaLore Projection (2D params with sufficient dims only)
+                if "rank" in group and grad.ndim >= 2 and min(grad.shape) > group["rank"]:
+                    if p not in self._projectors:
+                        self._projectors[p] = GaLoreProjector(group["rank"], update_proj_gap=group["update_proj_gap"], scale=group["scale"], proj_type=group["proj_type"])
                     
-                    grad = state["projector"].project(grad, state["step"])
+                    grad = self._projectors[p].project(grad, state["step"])
 
                 # State initialization
                 if "exp_avg" not in state:
@@ -123,8 +129,8 @@ class GaLore_AdamW(Optimizer):
                 norm_grad = exp_avg / denom
                 
                 # GaLore Projection Back
-                if "rank" in group:
-                    norm_grad = state["projector"].project_back(norm_grad)
+                if "rank" in group and p in self._projectors:
+                    norm_grad = self._projectors[p].project_back(norm_grad)
                 
                 p.add_(norm_grad, alpha=-step_size)
 

@@ -1,106 +1,207 @@
-import math
+import os
+
 import torch
-import torch.distributed as dist
-from torch.optim import Optimizer
 
-def zeropower_via_newtonschulz5(G, steps):
-    """
-    Newton-Schulz iteration to compute the zeroth power / orthogonalization of G. We opt to use a
-    quintic iteration whose coefficients are selected to maximize the slope at zero. For the purpose
-    of minimizing steps, it turns out to be empirically effective to keep increasing the slope at
-    zero even beyond the point where the iteration no longer converges all the way to one everywhere
-    on the interval. This iteration therefore does not produce UV^T but rather something like US'V^T
-    where S' is diagonal with S_{ii}' ~ Uniform(0.5, 1.5), which turns out not to hurt model
-    performance at all relative to UV^T, where USV^T = G is the SVD.
-    """
-    assert G.ndim >= 2 # batched Muon implementation by @scottjmaddox, and put into practice in the record by @YouJiacheng
-    a, b, c = (3.4445, -4.7750,  2.0315)
-    X = G.bfloat16()
-    if G.size(-2) > G.size(-1):
-        X = X.mT
 
-    # Ensure spectral norm is at most 1
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) + 1e-7)
-    # Perform the NS iterations
-    for _ in range(steps):
-        A = X @ X.mT
-        B = b * A + c * A @ A # quintic computation strategy adapted from suggestion by @jxbz, @leloykun, and @YouJiacheng
-        X = a * X + B @ X
-    
-    if G.size(-2) > G.size(-1):
-        X = X.mT
-    return X
-    
-class Shampoo(Optimizer):
+def _matrix_power(matrix: torch.Tensor, power: float) -> torch.Tensor:
     """
-    Adam optimizer with orthogonalization step.
+    Compute matrix power of a symmetric positive semi-definite matrix
+    via eigendecomposition. Computed on CPU for speed and numerical stability.
+
+    Args:
+        matrix: symmetric PSD matrix (will be moved to CPU for computation)
+        power: fractional power (e.g., -1/2 for inverse square root)
+
+    Returns:
+        matrix raised to the given power, on the original device/dtype
     """
-    def __init__(self,
-                 params,
-                 lr=0.001,
-                 betas=(0.9, 0.999),
-                 eps=1e-8,
-                 weight_decay=0,
-                 ns_steps=5
-                ):
-        defaults = dict(lr=lr,
-                        betas=betas,
-                        eps=eps,
-                        weight_decay=weight_decay,
-                        ns_steps=ns_steps)
+    device = matrix.device
+    dtype = matrix.dtype
+    matrix = matrix.float().cpu()
+    try:
+        eigenvalues, eigenvectors = torch.linalg.eigh(matrix)
+        eigenvalues = eigenvalues.clamp(min=1e-16)
+        result = eigenvectors @ torch.diag(eigenvalues.pow(power)) @ eigenvectors.T
+    except Exception:
+        # Fallback to SVD if eigendecomposition fails
+        U, S, Vh = torch.linalg.svd(matrix)
+        S = S.clamp(min=1e-16)
+        result = U @ torch.diag(S.pow(power)) @ Vh
+    return result.to(device=device, dtype=dtype)
+
+
+class Shampoo(torch.optim.Optimizer):
+    r"""Shampoo: Preconditioned Stochastic Tensor Optimization.
+
+    Implements the Shampoo optimizer from:
+    "Shampoo: Preconditioned Stochastic Tensor Optimization"
+    (Gupta, Koren, Singer, 2018) https://arxiv.org/abs/1802.09568
+
+    Reference implementation: https://github.com/moskomule/shampoo.pytorch
+
+    For each parameter tensor of order d with dimensions (n1, ..., nd),
+    maintains d preconditioner matrices G_i (ni x ni) that accumulate
+    gradient second-moment information along each dimension:
+
+        G_i += mat_i(grad) @ mat_i(grad)^T
+
+    The gradient is then preconditioned by applying G_i^{-1/d} along each
+    dimension, providing a structured second-order approximation that
+    captures per-dimension curvature.
+
+    Parameters with any dimension exceeding ``max_precond_dim`` fall back
+    to plain SGD with momentum (to avoid prohibitive memory/compute cost
+    for large embedding/vocabulary dimensions).
+
+    Args:
+        params: parameters to optimize
+        lr: learning rate (default: 1e-1)
+        betas: ``(momentum, unused)``. ``betas[0]`` is used as the momentum
+               factor. Framework-compatible interface with ``(beta1, beta2)``.
+        eps: epsilon for preconditioner initialization ``G_i = eps * I``
+             (default: 1e-4)
+        weight_decay: L2 penalty (default: 0)
+        update_freq: how often to recompute inverse preconditioners
+                     (default: read from env ``SHAMPOO_UPDATE_FREQ``, or 10)
+        max_precond_dim: dimensions larger than this skip Shampoo preconditioning
+                         (default: read from env ``SHAMPOO_MAX_PRECOND_DIM``, or 8192)
+    """
+
+    def __init__(
+        self,
+        params,
+        lr: float = 1e-1,
+        betas=(0.0, 0.999),
+        eps: float = 1e-4,
+        weight_decay: float = 0.0,
+        update_freq: int = None,
+        max_precond_dim: int = None,
+    ):
+        if lr <= 0.0:
+            raise ValueError(f"Invalid learning rate: {lr}")
+        if eps < 0.0:
+            raise ValueError(f"Invalid epsilon: {eps}")
+        if weight_decay < 0.0:
+            raise ValueError(f"Invalid weight_decay: {weight_decay}")
+
+        momentum = betas[0] if isinstance(betas, (tuple, list)) else 0.0
+        if momentum < 0.0:
+            raise ValueError(f"Invalid momentum: {momentum}")
+
+        if update_freq is None:
+            update_freq = int(os.environ.get("SHAMPOO_UPDATE_FREQ", "10"))
+        if update_freq < 1:
+            raise ValueError(f"Invalid update_freq: {update_freq}")
+
+        if max_precond_dim is None:
+            max_precond_dim = int(
+                os.environ.get("SHAMPOO_MAX_PRECOND_DIM", "8192")
+            )
+
+        defaults = dict(
+            lr=lr,
+            momentum=momentum,
+            eps=eps,
+            weight_decay=weight_decay,
+            update_freq=update_freq,
+            max_precond_dim=max_precond_dim,
+        )
         super().__init__(params, defaults)
 
     @torch.no_grad()
     def step(self, closure=None):
-        """
-        Performs a single optimization step.
+        """Performs a single optimization step (Algorithm 2 from the paper).
 
         Args:
-            closure (callable, optional): A closure that reevaluates the model
-                and returns the loss.
+            closure: A closure that reevaluates the model and returns the loss.
         """
         loss = None
         if closure is not None:
             loss = closure()
 
         for group in self.param_groups:
-            for p in group['params']:
+            for p in group["params"]:
                 if p.grad is None:
                     continue
-                grad = p.grad
+
+                grad = p.grad.data
+                if grad.is_sparse:
+                    raise RuntimeError(
+                        "Shampoo does not support sparse gradients"
+                    )
+
+                order = grad.ndimension()
+                original_size = grad.size()
                 state = self.state[p]
+                momentum = group["momentum"]
+                weight_decay = group["weight_decay"]
 
-                # Initialize state
+                # ---- State initialization ----
                 if len(state) == 0:
-                    state['step'] = 0
-                    state['exp_avg'] = torch.zeros_like(p)
-                    state['exp_avg_sq'] = torch.zeros_like(p)
+                    state["step"] = 0
+                    max_dim = group["max_precond_dim"]
+                    state["use_shampoo"] = order >= 2 and all(
+                        d <= max_dim for d in grad.size()
+                    )
+                    if momentum > 0:
+                        state["momentum_buffer"] = grad.clone()
+                    if state["use_shampoo"]:
+                        for dim_id, dim in enumerate(grad.size()):
+                            state[f"precond_{dim_id}"] = (
+                                group["eps"]
+                                * torch.eye(
+                                    dim, device=grad.device, dtype=grad.dtype
+                                )
+                            )
+                            state[f"inv_precond_{dim_id}"] = torch.zeros(
+                                dim, dim, device=grad.device, dtype=grad.dtype
+                            )
 
-                exp_avg, exp_avg_sq = state['exp_avg'], state['exp_avg_sq']
-                beta1, beta2 = group['betas']
+                # ---- Momentum (EMA with previous preconditioned update) ----
+                if momentum > 0:
+                    grad.mul_(1 - momentum).add_(
+                        state["momentum_buffer"], alpha=momentum
+                    )
 
-                state['step'] += 1
-                bias_correction1 = 1 - beta1 ** state['step']
-                bias_correction2 = 1 - beta2 ** state['step']
+                # ---- Weight decay ----
+                if weight_decay > 0:
+                    grad = grad.add(p.data, alpha=weight_decay)
 
-                # Update momentum and squared gradient
-                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                # ---- Shampoo preconditioning ----
+                if state["use_shampoo"]:
+                    for dim_id, dim in enumerate(original_size):
+                        precond = state[f"precond_{dim_id}"]
+                        inv_precond = state[f"inv_precond_{dim_id}"]
 
-                # Compute the update
-                denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(group['eps'])
-                step_size = group['lr'] / bias_correction1
+                        # Unfold: bring dimension dim_id to position 0
+                        grad = grad.transpose_(0, dim_id).contiguous()
+                        transposed_size = grad.size()
+                        grad = grad.reshape(dim, -1)
 
-                # Orthogonalize the update
-                update = exp_avg / denom
-                if update.ndim >= 2:
-                    update = zeropower_via_newtonschulz5(update, steps=group['ns_steps'])
+                        grad_t = grad.t()
+                        # Accumulate gradient outer product
+                        precond.add_(grad @ grad_t)
 
-                # Apply the update
-                p.add_(update, alpha=-step_size)
+                        # Periodically recompute inverse preconditioner
+                        if state["step"] % group["update_freq"] == 0:
+                            inv_precond.copy_(
+                                _matrix_power(precond, -1.0 / order)
+                            )
 
-                # Apply weight decay
-                if group['weight_decay'] != 0:
-                    p.add_(p, alpha=-group['lr'] * group['weight_decay'])
+                        if dim_id == order - 1:
+                            # Last dimension: finalize
+                            grad = grad_t @ inv_precond
+                            grad = grad.reshape(original_size)
+                        else:
+                            # Intermediate dimension: continue
+                            grad = inv_precond @ grad
+                            grad = grad.reshape(transposed_size)
+
+                state["step"] += 1
+                if momentum > 0:
+                    state["momentum_buffer"] = grad
+
+                # ---- Parameter update ----
+                p.data.add_(grad, alpha=-group["lr"])
 
         return loss

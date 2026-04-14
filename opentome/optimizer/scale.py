@@ -86,6 +86,7 @@ class SCALE(torch.optim.Optimizer):
                 g = p.grad
                 if g is None:
                     continue
+                orig_shape = p.shape
                 if g.ndim > 2:
                     g = g.view(g.size(0), -1)
                 assert g is not None
@@ -112,7 +113,9 @@ class SCALE(torch.optim.Optimizer):
                 var = torch.mean(torch.square(g), dim=col_dim, keepdim=True)
                 s = torch.sqrt(var).clamp_min_(1e-8)
                 u = g / s
-                
+                if u.shape != orig_shape:
+                    u = u.view(orig_shape)
+
                 # apply weight decay
                 p.data.mul_(1 - lr * weight_decay)
                 

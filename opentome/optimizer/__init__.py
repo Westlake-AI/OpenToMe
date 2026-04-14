@@ -1,14 +1,7 @@
 """
 OpenToMe Optimizers Package
 
-This package contains various state-of-the-art optimizers for deep learning,
-including adaptive learning rate optimizers, second-order methods, and 
-specialized optimizers for large language models.
-
-Optimizers are organized into three main categories:
-- SGG (Scaling with Gradient Grouping) variants: Enhanced optimizers with gradient processing
-- SAC (Structured Adaptive Computation) variants: Optimizers with structured computation
-- Standard/Third-party optimizers: Original implementations and other adaptive methods
+Optimizer implementations aligned with SAC/opt.
 """
 
 # SGG (Scaling with Gradient Grouping) Optimizers
@@ -17,77 +10,68 @@ from .sgg.adafactor_sgg import AdafactorSGG
 from .sgg.lamb_sgg import LambSGG
 from .sgg.shampoo_sgg import ShampooSGG
 
-# SAC (Structured Adaptive Computation) Optimizers  
+# SAC (Structured Adaptive Computation) Optimizers
 from .sac.adamw_sac import AdamWSAC
 from .sac.adam_mini_sac import Adam_miniSAC
 from .sac.shampoo_sac import ShampooSAC
+from .sac.lion_sac import SACLion
 
-# Standard & Third-party Optimizers
+# Standard & Third-party Optimizers (aligned with SAC/opt)
 from .adam_mini import Adam_mini
 from .lamb import Lamb
 from .shampoo import Shampoo
-from .galore_adamw import GaLore_AdamW
+from .galore_adamw import AdamW as GaLore_AdamW
+from .galore_adafactor import Adafactor as GaLoreAdafactor
 from .svd_projector import GaLoreProjector
 from .random_projector import GradientProjector
 from .adan import Adan
-from .apollo import APOLLO_AdamW
-from .came import CAME, GradientProjector as CAMEGradientProjector
+from .apollo import AdamW as APOLLO_AdamW
+from .came import CAME
 from .conda import Conda, CondaProjector
 from .lion import Lion
 from .moga import MOGASGD
 from .mars import MARS
 from .muon import Muon
-from .nadam import NAdam
-from .radam import RAdam, PlainRAdam, AdamW as RAdamW
+from .muon_ablation import MuonOldScale, MuonS4, MuonC1b, MuonBest
+from .nadam import NAdamLegacy as NAdam
+from .radam import RAdamLegacy as RAdam
 from .sophia import SophiaG
 from .soap import SOAP
 from .scale import SCALE
 from .rmnp import RMNP
+from .adabelief import AdaBelief
+from .adamp import AdamP
+from .adamw import AdamWLegacy
+from .adopt import Adopt
+from .kron import Kron
+from .laprop import LaProp
+from .lars import LARS
+from .nvnovograd import NvNovoGrad
+from .prodigy import Prodigy
+
+# Optional (requires bitsandbytes)
+try:
+    from .galore_adamw8bit import AdamW8bit as GaLoreAdamW8bit
+except (ImportError, ModuleNotFoundError):
+    GaLoreAdamW8bit = None
+
+try:
+    from .q_apollo import AdamW as QAPOLLOAdamW
+except (ImportError, ModuleNotFoundError):
+    QAPOLLOAdamW = None
 
 __all__ = [
-    # SGG Optimizers
+    # SGG
     'AdamWSGG', 'AdafactorSGG', 'LambSGG', 'ShampooSGG',
-    
-    # SAC Optimizers
-    'AdamWSAC', 'Adam_miniSAC', 'ShampooSAC',
-    
-    # Standard & Third-party Optimizers
-    'Adam_mini', 'NAdam', 'RAdam', 'PlainRAdam', 'RAdamW', 'Lamb', 'Shampoo',
-    'GaLore_AdamW', 'GaLoreProjector', 'GradientProjector', 'CAMEGradientProjector', 'CondaProjector',
-    'Adan', 'APOLLO_AdamW','CAME', 'Conda', 'Lion', 'MOGASGD', 'MARS', 'Muon', 'SophiaG', 'SOAP', 'SCALE', 'RMNP'
+    # SAC
+    'AdamWSAC', 'Adam_miniSAC', 'ShampooSAC', 'SACLion',
+    # Standard
+    'Adam_mini', 'Lamb', 'Shampoo', 'GaLore_AdamW', 'GaLoreAdafactor',
+    'GaLoreProjector', 'GradientProjector', 'CondaProjector',
+    'Adan', 'APOLLO_AdamW', 'CAME', 'Conda', 'Lion', 'MOGASGD', 'MARS', 'Muon',
+    'MuonOldScale', 'MuonS4', 'MuonC1b', 'MuonBest',
+    'NAdam', 'RAdam', 'SophiaG', 'SOAP', 'SCALE', 'RMNP',
+    # New from SAC
+    'AdaBelief', 'AdamP', 'AdamWLegacy', 'Adopt', 'Kron',
+    'LaProp', 'LARS', 'NvNovoGrad', 'Prodigy',
 ]
-
-
-# SGG (Scaling with Gradient Grouping) Optimizers
-SGG_OPTIMIZERS = [
-    'AdamWSGG', 'AdafactorSGG', 'LambSGG', 'ShampooSGG',
-]
-
-# SAC (Structured Adaptive Computation) Optimizers
-SAC_OPTIMIZERS = [
-    'AdamWSAC', 'Adam_miniSAC', 'ShampooSAC',
-]
-
-# Standard & Third-party Optimizers
-STANDARD_OPTIMIZERS = [
-    'Adam_mini', 'Lamb', 'Shampoo', 'Adan', 'APOLLO_AdamW', 'Lion',
-    'MARS', 'Muon', 'NAdam', 'RAdam', 'PlainRAdam', 'SophiaG', 'SOAP',
-    'SCALE', 'MOGASGD', 'RMNP'
-]
-
-# Gradient compression and low-rank optimizers
-LOW_RANK_OPTIMIZERS = [
-    'GaLore_AdamW', 'CAME', 'Conda',
-]
-
-# Utility classes
-UTILITY_CLASSES = [
-    'GaLoreProjector', 'GradientProjector', 'CAMEGradientProjector', 'CondaProjector', 'RAdamW',
-]
-
-# Legacy categorization (for backward compatibility)
-ADAM_OPTIMIZERS = SGG_OPTIMIZERS[:1] + SAC_OPTIMIZERS[:1] + ['Adam_mini']
-ADAFACTOR_OPTIMIZERS = [opt for opt in SGG_OPTIMIZERS if 'Adafactor' in opt]
-LAMB_OPTIMIZERS = [opt for opt in SGG_OPTIMIZERS if 'Lamb' in opt]
-SECOND_ORDER_OPTIMIZERS = [opt for opt in SGG_OPTIMIZERS + SAC_OPTIMIZERS if 'Shampoo' in opt]
-OTHER_OPTIMIZERS = STANDARD_OPTIMIZERS[3:]  # Exclude Adam_mini, Lamb, Shampoo

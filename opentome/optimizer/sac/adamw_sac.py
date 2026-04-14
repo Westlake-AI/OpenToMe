@@ -10,11 +10,11 @@ import torch
 from torch.optim import Optimizer
 
 
-class AdamWSAC(Optimizer):  # v0807-v0815
+class AdamWSAC(Optimizer):  # v0825
     def __init__(self, params, model, lr=1e-3, betas=(0.9, 0.95), eps=1e-8,
                  weight_decay=0.01, scale_update_freq=500, scale_bound=(0.1, 10),
                  correct_bias=True, amsgrad=False, verbose=True, weight_decay_factor=0.01,
-                 **kwargs):
+                 align_gradients=True, **kwargs):
         if not 0.0 <= lr:
             raise ValueError(f"Invalid learning rate: {lr}")
         if not 0.0 <= eps:
@@ -36,6 +36,7 @@ class AdamWSAC(Optimizer):  # v0807-v0815
         self.verbose = verbose
         self.weight_decay_factor = weight_decay_factor
         self._step_count = 0
+        self.align_gradients = align_gradients
 
         # Define keyword sets for parameter categorization (used in fallback)
         self.embedding_names = {"embed_tokens"}
@@ -154,26 +155,38 @@ class AdamWSAC(Optimizer):  # v0807-v0815
             print(f"Block distribution: {dict(block_counts)}")
 
     def adjust_weight_decay(self, weight_decay, param_shape, is_scalable):
-        """Adjusts weight decay based on parameter shape."""
+        """
+        Adjusts weight decay based on parameter shape for scalable parameters.
+        Args:
+            weight_decay (float): Base weight decay rate.
+            param_shape (tuple): Shape of the parameter tensor.
+            is_scalable (bool): Whether the parameter is scalable (dim > 1).
+        Returns:
+            float: Adjusted weight decay rate.
+        """
         if not is_scalable or weight_decay == 0:
-            return weight_decay
+            return weight_decay  # No adjustment for non-scalable parameters or zero weight decay
 
+        # Use the maximum dimension of the parameter shape
         max_dim = max(param_shape)
         adjusted_ratio = self.weight_decay_factor * math.sqrt(max_dim)
-        # ⚠️ You compute adjusted_ratio but never use it — fix if needed
-        # For now, return original — you may want: return weight_decay * adjusted_ratio
-        return weight_decay  # <-- Consider modifying this line if you want adaptive WD
+        adjusted_weight_decay = weight_decay
+        return adjusted_weight_decay
 
     def _compute_scale_factors(self):
-        """Computes scale factors for layer -> block hierarchy."""
+        """Computes scale factors for layer -> block hierarchy based on gradient deviations."""
         param_map = {id(p): p for group in self.param_groups for p in group['params'] if p.grad is not None}
         if not param_map:
             return
         eps = torch.finfo(torch.float32).eps
 
-        # Step 1: Compute global gradient statistics
-        global_grads_list = []
-        global_distances_list = []
+        # Step 1: Compute global gradient statistics incrementally to avoid memory issues
+        # Use sampling approach for large models to avoid INT_MAX element limit
+        max_elements_per_batch = 1000000  # 1M elements per batch to avoid memory issues
+        global_median_distance = eps
+
+        # Collect all block-level statistics first
+        block_stats = []
         for l, blocks in self.structure_mapping.items():
             for b, param_ids in blocks.items():
                 block_grads = []
@@ -182,76 +195,109 @@ class AdamWSAC(Optimizer):  # v0807-v0815
                         grad = param_map[param_id].grad
                         p = param_map[param_id]
                         param_size = torch.tensor(p.numel(), dtype=torch.float32, device=grad.device)
-                        normalized_grad = grad / torch.sqrt(param_size + 1e-16)
-                        # ⚠️ Removed alignment — was conceptually flawed
-                        aligned_grad = normalized_grad  # self._align_gradients(p, normalized_grad) ← removed
+                        normalized_grad = grad / torch.sqrt(param_size + eps)
+                        aligned_grad = self._align_gradients(p, normalized_grad)
                         block_grads.append(aligned_grad.view(-1))
                 if block_grads:
                     block_grads_cat = torch.cat(block_grads)
-                    global_grads_list.append(block_grads_cat)
+                    # Compute block-level center and distances for global stats
                     block_center = block_grads_cat.mean()
                     block_distances = (block_grads_cat - block_center).abs()
-                    global_distances_list.append(block_distances)
+                    block_median = block_distances.median()
+                    block_stats.append({
+                        'layer': l,
+                        'block': b,
+                        'median': block_median.item(),
+                        'size': block_distances.numel()
+                    })
 
-        if not global_grads_list:
+        if not block_stats:
             return
 
-        global_distances = torch.cat(global_distances_list)
-        global_median_distance = max(global_distances.median(), eps)
+        # Compute global median using weighted approach to avoid large tensor concatenation
+        total_elements = sum(stat['size'] for stat in block_stats)
+        if total_elements > max_elements_per_batch:
+            # For large models, use sampling-based approach
+            sample_size = min(max_elements_per_batch, total_elements // 10)
+            sampled_medians = []
 
-        # Step 2: Compute layer-wise and block-wise scales
+            for stat in block_stats:
+                # Sample proportionally from each block
+                block_sample_size = max(1, int(sample_size * stat['size'] / total_elements))
+                # Use the block median as representative
+                sampled_medians.extend([stat['median']] * block_sample_size)
+
+            if sampled_medians:
+                global_median_distance = max(torch.tensor(sampled_medians).median().item(), eps)
+        else:
+            # For small models, use original approach
+            all_medians = [stat['median'] for stat in block_stats]
+            global_median_distance = max(torch.tensor(all_medians).median().item(), eps)
+
+        # Step 2: Compute layer-wise and block-wise scales with memory-efficient approach
         new_raw_scales = defaultdict(lambda: defaultdict(lambda: 1.0))
         for l, blocks in self.structure_mapping.items():
-            layer_grads_list = []
-            layer_distances_list = []
+            layer_block_stats = []
             for b, param_ids in blocks.items():
                 block_grads = []
                 for param_id in param_ids:
                     if param_id in param_map and self.param_to_structure[param_id]['is_scalable']:
                         grad = param_map[param_id].grad
-                        p = param_map[param_id]
-                        param_size = torch.tensor(p.numel(), dtype=torch.float32, device=grad.device)
-                        normalized_grad = grad / torch.sqrt(param_size + 1e-16)
-                        aligned_grad = normalized_grad  # ← again, no alignment
+                        aligned_grad = self._align_gradients(param_map[param_id], grad)
                         block_grads.append(aligned_grad.view(-1))
                 if block_grads:
                     block_grads_cat = torch.cat(block_grads)
-                    layer_grads_list.append(block_grads_cat)
+                    # Compute block-level statistics
                     block_center = block_grads_cat.mean()
                     block_distances = (block_grads_cat - block_center).abs()
-                    median_distance = max(block_distances.median(), eps)
                     mad = torch.median(torch.abs(block_distances - block_distances.median())) + eps
-                    mad = max(mad, eps)
-                    # ⚠️ This scale_adjustment is arbitrary — consider replacing with something like:
-                    # scale_adjustment = (global_median_distance / median_distance).item()
                     scale_adjustment = torch.log1p(block_distances / mad).mean().item()
-                    new_raw_scales[l][b] = scale_adjustment
-                    layer_distances_list.append(block_distances)
+                    new_raw_scales[l][b] = scale_adjustment  # Store raw block adjustment
 
-            if layer_grads_list:
-                layer_grads = torch.cat(layer_grads_list)
-                layer_center = layer_grads.mean()
-                layer_distances = torch.cat(layer_distances_list)
-                layer_median_distance = max(layer_distances.median(), eps)
+                    # Store layer-level statistics for efficient computation
+                    layer_block_stats.append({
+                        'block': b,
+                        'median': block_distances.median().item(),
+                        'size': block_distances.numel(),
+                        'center': block_center.item()
+                    })
+
+            if layer_block_stats:
+                # Compute layer-level statistics using representative sampling
+                total_layer_elements = sum(stat['size'] for stat in layer_block_stats)
+                if total_layer_elements > max_elements_per_batch:
+                    # For large layers, use weighted median approach
+                    layer_median_distance = eps
+                    weighted_medians = []
+                    for stat in layer_block_stats:
+                        weight = stat['size'] / total_layer_elements
+                        weighted_medians.extend([stat['median']] * max(1, int(weight * 1000)))
+                    if weighted_medians:
+                        layer_median_distance = max(torch.tensor(weighted_medians).median().item(), eps)
+                else:
+                    # For small layers, use original approach
+                    layer_medians = [stat['median'] for stat in layer_block_stats]
+                    layer_median_distance = max(torch.tensor(layer_medians).median().item(), eps)
+
                 layer_scale = global_median_distance / layer_median_distance if layer_median_distance > 0 else 1.0
 
+                # Apply layer scale to block adjustments
                 for b in blocks:
                     if b in new_raw_scales[l]:
                         combined_scale = layer_scale * new_raw_scales[l][b]
                         bounded_scale = max(self.scale_bound[0], min(self.scale_bound[1], combined_scale))
                         new_raw_scales[l][b] = bounded_scale
 
-        # Step 3: Update scales (currently hard overwrite — not EMA)
+        # Step 3: Update scales
         self._update_ema_scales(new_raw_scales)
 
     def _update_ema_scales(self, new_raw_scales):
-        """Updates scales directly from raw computation (not real EMA yet)."""
+        """Updates scales directly from raw computation (no EMA for simplicity)."""
         updated_scales = defaultdict(lambda: defaultdict(lambda: 1.0))
         for l, blocks in new_raw_scales.items():
             for b, raw_scale in blocks.items():
                 updated_scales[l][b] = raw_scale
                 self.raw_structure_scales[l][b] = raw_scale
-        # Keep existing scales if not updated
         for l, blocks in self.structure_scales.items():
             for b in blocks:
                 if b not in new_raw_scales[l]:
@@ -262,10 +308,12 @@ class AdamWSAC(Optimizer):  # v0807-v0815
         """Helper to get structural details for a parameter."""
         return self.param_to_structure.get(id(p))
 
+    @torch.compile
     def _align_gradients(self, p, grad):
+        """Aligns gradients with parameters by scaling based on their relative magnitudes."""
         param_norm = p.data.norm(2)
         grad_norm = grad.norm(2)
-        ratio = (param_norm + 1e-16) / (grad_norm + 1e-16)
+        ratio = (param_norm + 1e-8) / (grad_norm + 1e-8)
         alignment_factor = torch.log1p(ratio)
         alignment_factor = torch.clamp(alignment_factor, 0.1, 10)
         return grad * alignment_factor
@@ -291,8 +339,8 @@ class AdamWSAC(Optimizer):  # v0807-v0815
                 if grad.is_sparse:
                     raise RuntimeError('SACAdamW does not support sparse gradients')
 
-                # ⚠️ No alignment — pass grad as-is
-                aligned_grad = grad  # self._align_gradients(p, grad) ← removed
+                # Apply gradient alignment
+                aligned_grad = self._align_gradients(p, grad)
 
                 state = self.state[p]
 

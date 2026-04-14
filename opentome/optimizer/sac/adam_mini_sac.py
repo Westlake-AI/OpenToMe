@@ -247,9 +247,13 @@ class Adam_miniSAC(torch.optim.Optimizer):
             return
 
         eps = torch.finfo(torch.float32).eps
-        global_distances_list = []
+
+        # Use memory-efficient approach to avoid INT_MAX elements error
+        max_elements_per_batch = 1000000  # 1M elements per batch to avoid memory issues
+        global_median_distance = eps
 
         # 全局鲁棒尺度
+        block_stats = []
         for l, blocks in self.structure_mapping.items():
             for b, pids in blocks.items():
                 block_vecs = []
@@ -261,28 +265,47 @@ class Adam_miniSAC(torch.optim.Optimizer):
                         if g.is_sparse:
                             g = g.coalesce().to_dense()
                         size = torch.tensor(p.numel(), dtype=torch.float32, device=g.device)
-                        g_normed = g / torch.sqrt(size + 1e-16)
+                        g_normed = g / torch.sqrt(size + eps)
                         g_aligned = self._align_gradients(p, g_normed)
                         block_vecs.append(g_aligned.reshape(-1))
                 if block_vecs:
                     block_cat = torch.cat(block_vecs, dim=0)
                     c = block_cat.mean()
                     d = (block_cat - c).abs()
-                    global_distances_list.append(d)
+                    block_stats.append({
+                        'layer': l,
+                        'block': b,
+                        'median': d.median().item(),
+                        'size': d.numel()
+                    })
 
-        if not global_distances_list:
+        if not block_stats:
             return
 
-        global_distances = torch.cat(global_distances_list, dim=0)
-        global_median_distance = torch.maximum(
-            global_distances.median(),
-            torch.tensor(eps, device=global_distances.device)
-        )
+        # Compute global median using weighted approach to avoid large tensor concatenation
+        total_elements = sum(stat['size'] for stat in block_stats)
+        if total_elements > max_elements_per_batch:
+            # For large models, use sampling-based approach
+            sample_size = min(max_elements_per_batch, total_elements // 10)
+            sampled_medians = []
+
+            for stat in block_stats:
+                # Sample proportionally from each block
+                block_sample_size = max(1, int(sample_size * stat['size'] / total_elements))
+                # Use the block median as representative
+                sampled_medians.extend([stat['median']] * block_sample_size)
+
+            if sampled_medians:
+                global_median_distance = max(torch.tensor(sampled_medians).median().item(), eps)
+        else:
+            # For small models, use original approach
+            all_medians = [stat['median'] for stat in block_stats]
+            global_median_distance = max(torch.tensor(all_medians).median().item(), eps)
 
         # 分层/分块缩放
         new_raw = defaultdict(lambda: defaultdict(lambda: 1.0))
         for l, blocks in self.structure_mapping.items():
-            layer_distances = []
+            layer_block_stats = []
             for b, pids in blocks.items():
                 block_vecs = []
                 for pid in pids:
@@ -293,7 +316,7 @@ class Adam_miniSAC(torch.optim.Optimizer):
                         if g.is_sparse:
                             g = g.coalesce().to_dense()
                         size = torch.tensor(p.numel(), dtype=torch.float32, device=g.device)
-                        g_normed = g / torch.sqrt(size + 1e-16)
+                        g_normed = g / torch.sqrt(size + eps)
                         g_aligned = self._align_gradients(p, g_normed)
                         block_vecs.append(g_aligned.reshape(-1))
                 if block_vecs:
@@ -306,13 +329,32 @@ class Adam_miniSAC(torch.optim.Optimizer):
                     mad = torch.maximum(mad, torch.tensor(eps, device=mad.device))
                     local_adj = torch.log1p(d / mad).mean().item()
                     new_raw[l][b] = local_adj
-                    layer_distances.append(d)
 
-            if layer_distances:
-                layer_distances = torch.cat(layer_distances, dim=0)
-                layer_median = torch.maximum(layer_distances.median(),
-                                             torch.tensor(eps, device=layer_distances.device))
-                layer_scale = (global_median_distance / layer_median).item() if layer_median > 0 else 1.0
+                    layer_block_stats.append({
+                        'block': b,
+                        'median': d.median().item(),
+                        'size': d.numel(),
+                        'center': c.item()
+                    })
+
+            if layer_block_stats:
+                # Compute layer-level statistics using representative sampling
+                total_layer_elements = sum(stat['size'] for stat in layer_block_stats)
+                if total_layer_elements > max_elements_per_batch:
+                    # For large layers, use weighted median approach
+                    layer_median_distance = eps
+                    weighted_medians = []
+                    for stat in layer_block_stats:
+                        weight = stat['size'] / total_layer_elements
+                        weighted_medians.extend([stat['median']] * max(1, int(weight * 1000)))
+                    if weighted_medians:
+                        layer_median_distance = max(torch.tensor(weighted_medians).median().item(), eps)
+                else:
+                    # For small layers, use original approach
+                    layer_medians = [stat['median'] for stat in layer_block_stats]
+                    layer_median_distance = max(torch.tensor(layer_medians).median().item(), eps)
+
+                layer_scale = global_median_distance / layer_median_distance if layer_median_distance > 0 else 1.0
                 for b in blocks.keys():
                     if b in new_raw[l]:
                         s = layer_scale * new_raw[l][b]

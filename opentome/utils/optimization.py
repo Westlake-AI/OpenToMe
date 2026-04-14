@@ -30,9 +30,11 @@ except ImportError as e:
 
 try:   # Standard & Third-party Optimizers
     from opentome.optimizer import (
-        Adam_mini, Lamb, Shampoo, GaLore_AdamW, CAME, Conda,
-        Adan, APOLLO_AdamW, Lion, MARS, Muon, NAdam, RAdam, SophiaG, SOAP, SCALE, MOGASGD,
-        RMNP
+        Adam_mini, Lamb, Shampoo, GaLore_AdamW, GaLoreAdafactor, CAME, Conda,
+        Adan, APOLLO_AdamW, Lion, MARS, Muon, NAdam, RAdam, SophiaG, SOAP,
+        MOGASGD, SCALE, RMNP,
+        AdaBelief, AdamP, AdamWLegacy, Adopt, Kron, LaProp, LARS, NvNovoGrad, Prodigy,
+        MuonOldScale, MuonS4, MuonC1b, MuonBest,
     )
     standard_optimizers_available = True
 except ImportError as e:
@@ -53,25 +55,25 @@ from torchtitan.components.ft import FTManager
 def create_optimizer_with_encoder_lr(model, base_lr, lr_local, optimizer_kwargs_fn, local_rank=0):
     """
     Create optimizer with different learning rates for different encoders.
-    
+
     Args:
         model: The model (should be HybridToMeModel)
         base_lr: Base learning rate (for latent encoder and other modules)
         lr_local: Learning rate for local encoder and cross attention modules
         optimizer_kwargs_fn: Function to get optimizer kwargs (e.g., optimizer_kwargs(cfg=args))
         local_rank: Local rank for logging (default: 0)
-    
+
     Returns:
         Optimizer with parameter groups
     """
     from opentome.models.mergenet.model import HybridToMeModel
     from timm.optim import create_optimizer_v2
-    
+
     # Check if model is HybridToMeModel
     if not isinstance(model, HybridToMeModel):
         logger.warning("Model is not HybridToMeModel, using default optimizer creation")
         return create_optimizer_v2(model, **optimizer_kwargs_fn())
-    
+
     # Get optimizer kwargs
     opt_kwargs = optimizer_kwargs_fn()
     opt_type = opt_kwargs.pop('opt', 'adamw')
@@ -79,26 +81,26 @@ def create_optimizer_with_encoder_lr(model, base_lr, lr_local, optimizer_kwargs_
     momentum = opt_kwargs.pop('momentum', 0.9)
     opt_eps = opt_kwargs.pop('opt_eps', None)
     opt_betas = opt_kwargs.pop('opt_betas', None)
-    
+
     # Separate parameters by module
     param_groups = []
-    
+
     # Group 1: Local encoder + Cross attention (use lr_local)
     local_and_cross_params = []
-    
+
     # Local encoder parameters
     if hasattr(model, 'local'):
         local_params = list(model.local.parameters())
         local_and_cross_params.extend(local_params)
         if local_rank == 0:
             logger.info(f'Local encoder: {sum(p.numel() for p in local_params):,} params')
-    
+
     # Cross attention parameters
     if hasattr(model, 'encode_cross_attention'):
         local_and_cross_params.extend(model.encode_cross_attention.parameters())
     if hasattr(model, 'decode_cross_attention'):
         local_and_cross_params.extend(model.decode_cross_attention.parameters())
-    
+
     if local_and_cross_params:
         param_groups.append({
             'params': local_and_cross_params,
@@ -107,24 +109,24 @@ def create_optimizer_with_encoder_lr(model, base_lr, lr_local, optimizer_kwargs_
         })
         if local_rank == 0:
             logger.info(f'Local encoder + Cross attention: {sum(p.numel() for p in local_and_cross_params):,} params, LR={lr_local:.2e}')
-    
+
     # Group 2: Latent encoder + Head + Other (use base_lr)
     latent_and_other_params = []
-    
+
     # Latent encoder parameters
     if hasattr(model, 'latent') and model.latent is not None:
         latent_params = list(model.latent.parameters())
         latent_and_other_params.extend(latent_params)
         if local_rank == 0:
             logger.info(f'Latent encoder: {sum(p.numel() for p in latent_params):,} params')
-    
+
     # Classification head parameters
     if hasattr(model, 'head'):
         head_params = list(model.head.parameters())
         latent_and_other_params.extend(head_params)
         if local_rank == 0:
             logger.info(f'Head: {sum(p.numel() for p in head_params):,} params')
-    
+
     # Other parameters (if any)
     named_params = dict(model.named_parameters())
     grouped_param_names = set()
@@ -134,10 +136,10 @@ def create_optimizer_with_encoder_lr(model, base_lr, lr_local, optimizer_kwargs_
                 if param is p:
                     grouped_param_names.add(name)
                     break
-    
+
     other_params = [p for name, p in named_params.items() if name not in grouped_param_names]
     latent_and_other_params.extend(other_params)
-    
+
     if latent_and_other_params:
         param_groups.append({
             'params': latent_and_other_params,
@@ -146,7 +148,7 @@ def create_optimizer_with_encoder_lr(model, base_lr, lr_local, optimizer_kwargs_
         })
         if local_rank == 0:
             logger.info(f'Latent encoder + Head + Other: {sum(p.numel() for p in latent_and_other_params):,} params, LR={base_lr:.2e}')
-    
+
     # Apply optimizer kwargs to all groups
     for group in param_groups:
         group['weight_decay'] = weight_decay
@@ -154,7 +156,7 @@ def create_optimizer_with_encoder_lr(model, base_lr, lr_local, optimizer_kwargs_
             group['eps'] = opt_eps
         if opt_betas is not None:
             group['betas'] = opt_betas
-    
+
     # Create optimizer based on type
     if opt_type == 'adamw':
         optimizer = torch.optim.AdamW(param_groups, **opt_kwargs)
@@ -165,35 +167,35 @@ def create_optimizer_with_encoder_lr(model, base_lr, lr_local, optimizer_kwargs_
     else:
         # Fallback to create_optimizer_v2 for custom optimizers
         optimizer = create_optimizer_v2(param_groups, opt=opt_type, **opt_kwargs)
-    
+
     if local_rank == 0:
         logger.info(f'Created {opt_type} optimizer with {len(param_groups)} parameter groups')
         for i, group in enumerate(param_groups):
             logger.info(f'  Group {i} ({group.get("name", "unknown")}): LR={group["lr"]:.2e}, '
                        f'{sum(p.numel() for p in group["params"]):,} params')
-    
+
     return optimizer
 
 
 def create_scheduler_with_encoder_lr(args, optimizer, lr_local=None):
     """
     Create scheduler that properly handles multiple parameter groups with different learning rates.
-    
+
     Args:
         args: Training arguments
         optimizer: Optimizer with multiple parameter groups
         lr_local: Learning rate for local encoder (if None, will be inferred from optimizer)
-    
+
     Returns:
         LR scheduler that maintains the ratio between parameter groups
     """
     from timm.scheduler import create_scheduler
-    
+
     # Check if optimizer has multiple parameter groups
     if len(optimizer.param_groups) <= 1:
         # Single parameter group, use default scheduler
         return create_scheduler(args, optimizer)
-    
+
     # Multiple parameter groups detected
     # Calculate the ratio between lr_local and base_lr
     base_lr = optimizer.param_groups[0]['lr']
@@ -203,21 +205,21 @@ def create_scheduler_with_encoder_lr(args, optimizer, lr_local=None):
             if 'local_encoder_and_cross_attention' in group.get('name', ''):
                 lr_local = group['lr']
                 break
-    
+
     if lr_local is None:
         # Fallback: use default scheduler (it should handle multiple groups automatically)
         return create_scheduler(args, optimizer)
-    
+
     # Calculate ratio to maintain
     lr_ratio = lr_local / base_lr if base_lr > 0 else 1.0
-    
+
     # Create scheduler with base_lr (it will adjust all groups proportionally)
     scheduler, num_epochs = create_scheduler(args, optimizer)
-    
+
     # Note: PyTorch schedulers automatically handle multiple parameter groups
     # They maintain the relative ratios between groups
     # So if initial ratio is lr_local/lr = 0.1, it will stay 0.1 after scheduling
-    
+
     return scheduler, num_epochs
 
 
@@ -226,7 +228,9 @@ def build_optimizers(
     model_parts: list[nn.Module],
     job_config: JobConfig,
     ft_manager: FTManager,
-    metrics: dict = None
+    muon_params=None,
+    adamw_params=None,
+    metrics=None,
 ) -> OptimizersContainer:
     """Create a OptimizersContainer for the given model parts and job config.
 
@@ -251,6 +255,12 @@ def build_optimizers(
             "Optimizers in backward is not supported with pipeline parallelism."
         )
     name = job_config.optimizer.name
+    if name in ("SCALE", "RMNP") and metrics is None:
+        raise ValueError(
+            f"Optimizer '{name}' requires `metrics` "
+            "(from build_scale_metrics / build_rmnp_metrics). "
+            "See trainer/flame/flame/train.py when DEFAULT_OPT is SCALE or RMNP."
+        )
     lr = job_config.optimizer.lr
     beta1 = job_config.optimizer.beta1
     beta2 = job_config.optimizer.beta2
@@ -265,7 +275,7 @@ def build_optimizers(
 
     # Build optimizer kwargs based on optimizer type
     optimizer_kwargs = {"lr": lr, "weight_decay": weight_decay}
-    
+
     # Add optimizer-specific parameters
     if name in ["Adam", "AdamW", "Adamax"]:
         optimizer_kwargs.update({
@@ -274,7 +284,7 @@ def build_optimizers(
             "fused": fused,
             "foreach": foreach,
         })
-    
+
     # SGG  Optimizers
     elif name == "AdamWSGG":
         optimizer_kwargs.update({
@@ -314,7 +324,7 @@ def build_optimizers(
             "optimize_1d": bool(os.environ.get("OPTIMIZE_1D", "True").lower() == "true"),
             "lr_1d": float(os.environ.get("LR_1D", str(lr)))
         }
-    
+
     # SAC (Structured Adaptive Computation) Optimizers
     elif name == "AdamWSAC":
         optimizer_kwargs.update({
@@ -339,7 +349,7 @@ def build_optimizers(
             "scale_update_freq": int(os.environ.get("UPDATE_ITER", "1000")),
             "scale_bound": eval(os.environ.get("SCALE_BOUND", "(0.5, 1.0)"))
         })
-    
+
     # Standard & Third-party Optimizers
     elif name == "Adam_mini":
         optimizer_kwargs.update({
@@ -353,44 +363,55 @@ def build_optimizers(
             "betas": (beta1, beta2)
         })
     elif name == "Shampoo":
+        shampoo_update_freq = int(os.environ.get("SHAMPOO_UPDATE_FREQ", "10"))
+        shampoo_max_precond_dim = int(os.environ.get("SHAMPOO_MAX_PRECOND_DIM", "8192"))
         optimizer_kwargs.update({
             "betas": (beta1, beta2),
             "eps": eps,
+            "update_freq": shampoo_update_freq,
+            "max_precond_dim": shampoo_max_precond_dim,
         })
     elif name == "Muon":
-        assert metrics["muon_params"] is not None and metrics["adamw_params"] is not None, "Muon optimizer requires both muon_params and adamw_params"
         optimizer_kwargs.update({
-            "muon_params": metrics["muon_params"],
+            "betas": (beta1, beta2),
+            "eps": eps,
             "nesterov": True,
             "ns_steps": 5,
-            "adamw_params": metrics["adamw_params"],
-            "adamw_betas": (beta1, beta2),
-            "adamw_eps": eps,
         })
-    elif name == "SOAP":
+        if muon_params is not None and adamw_params is not None:
+            optimizer_kwargs["muon_params"] = muon_params
+            optimizer_kwargs["adamw_params"] = adamw_params
+    elif name in ("MuonOldScale", "MuonS4", "MuonC1b", "MuonBest"):
         optimizer_kwargs.update({
             "betas": (beta1, beta2),
             "eps": eps,
+            "nesterov": True,
+            "ns_steps": 5,
+        })
+        if muon_params is not None and adamw_params is not None:
+            optimizer_kwargs["muon_params"] = muon_params
+            optimizer_kwargs["adamw_params"] = adamw_params
+    elif name == "SOAP":
+        soap_max_precond_dim = int(os.environ.get("SOAP_MAX_PRECOND_DIM", "10000"))
+        soap_precond_freq = int(os.environ.get("SOAP_PRECOND_FREQ", "10"))
+        optimizer_kwargs.update({
+            "betas": (beta1, beta2),
+            "eps": eps,
+            "max_precond_dim": soap_max_precond_dim,
+            "precondition_frequency": soap_precond_freq,
         })
     elif name == "MARS":
-        lr_1d = float(os.environ.get("LR_1D", lr))
         mars_type = os.environ.get("MARS_TYPE", "mars-adamw")
-        beta1_1d = float(os.environ.get("BETA1_1D", beta1))
-        beta2_1d = float(os.environ.get("BETA2_1D", beta2))
-        assert lr_1d > 0, "LR_1D must be greater than 0"
-        assert beta1_1d > 0 and beta1_1d < 1, "BETA1_1D must be between 0 and 1"
-        assert beta2_1d > 0 and beta2_1d < 1, "BETA2_1D must be between 0 and 1"
-        
         optimizer_kwargs.update({
             "betas": (beta1, beta2),
             "eps": eps,
-            "gamma": 0.025,
-            "lr_1d": lr_1d,
+            "gamma": float(os.environ.get("MARS_GAMMA", "0.025")),
+            "lr_1d": lr,
             "is_approx": True,
             "mars_type": mars_type,
             "optimize_1d": False,
             "weight_decay_1d": weight_decay,
-            "betas_1d": (beta1_1d, beta2_1d)
+            "betas_1d": (beta1, beta2)
         })
     elif name == "Adan":
         optimizer_kwargs.update({
@@ -406,20 +427,20 @@ def build_optimizers(
             "betas": (beta1, beta2),
         }
     elif name == "MOGASGD":
-        optimizer_kwargs = {
+        optimizer_kwargs.update({
             "eps": eps,
             "momentum": 0.9,
-            "weight_decay": weight_decay,
             "nesterov_mom": 0.0,
             "max_grad_norm": 1.0,
             "p_exp": 2.0,
             "q_exp": torch.inf,
             "use_fan_scaling": True,
-        }
+        })
     elif name == "SCALE":
         adam_lr = float(os.environ.get("ADAM_LR", lr))
         assert adam_lr > 0, "ADAM_LR must be greater than 0"
         optimizer_kwargs = {
+            "lr": lr,
             "weight_decay": weight_decay,
             "main_params": metrics["main_params"],
             "secondary_params": metrics["secondary_params"],
@@ -429,12 +450,13 @@ def build_optimizers(
             "momentum": 0.9,
             "adam_lr": adam_lr,
             "adamw_betas": (beta1, beta2),
-            "adamw_eps": eps, 
+            "adamw_eps": eps,
         }
     elif name == "RMNP":
         adam_lr = float(os.environ.get("ADAM_LR", lr))
         assert adam_lr > 0, "ADAM_LR must be greater than 0"
         optimizer_kwargs = {
+            "lr": lr,
             "rmnp_params": metrics["rmnp_params"],
             "adam_params": metrics["adam_params"],
             "lr_adam": adam_lr,
@@ -444,10 +466,31 @@ def build_optimizers(
             "betas": (beta1, beta2),
             "eps": eps,
         }
-    elif name in ["GaLore_AdamW", "CAME", "Conda", "APOLLO_AdamW"]:
+    elif name == "GaLore_AdamW":
         optimizer_kwargs.update({
             "betas": (beta1, beta2),
             "eps": eps,
+            "rank": int(os.environ.get("GALORE_RANK", "256")),
+            "update_proj_gap": int(os.environ.get("GALORE_UPDATE_PROJ_GAP", "200")),
+            "scale": float(os.environ.get("GALORE_SCALE", "0.25")),
+            "proj_type": os.environ.get("GALORE_PROJ_TYPE", "std"),
+        })
+    elif name == "APOLLO_AdamW":
+        optimizer_kwargs.update({
+            "betas": (beta1, beta2),
+            "eps": eps,
+            "rank": int(os.environ.get("APOLLO_RANK", "256")),
+            "update_proj_gap": int(os.environ.get("APOLLO_UPDATE_PROJ_GAP", "200")),
+            "scale": float(os.environ.get("APOLLO_SCALE", "1")),
+            "proj_type": os.environ.get("APOLLO_PROJ_TYPE", "std"),
+            "scale_type": os.environ.get("APOLLO_SCALE_TYPE", "channel"),
+            "proj": os.environ.get("APOLLO_PROJ", "random"),
+        })
+    elif name in ["CAME", "Conda"]:
+        came_beta3 = float(os.environ.get("CAME_BETA3", "0.9999"))
+        optimizer_kwargs.update({
+            "betas": (beta1, beta2, came_beta3),
+            "eps": (1e-30, eps),
         })
     elif name in ["NAdam", "RAdam"]:
         optimizer_kwargs.update({
@@ -473,7 +516,36 @@ def build_optimizers(
             "eps": eps,
             "foreach": foreach,
         })
-    
+    elif name in ["AdaBelief", "AdamP", "AdamWLegacy", "LaProp", "NvNovoGrad"]:
+        optimizer_kwargs.update({
+            "betas": (beta1, beta2),
+            "eps": eps,
+        })
+    elif name == "Adopt":
+        optimizer_kwargs.update({
+            "betas": (beta1, beta2),
+            "eps": eps,
+        })
+    elif name == "Kron":
+        optimizer_kwargs.update({})
+    elif name == "LARS":
+        optimizer_kwargs.update({
+            "momentum": 0.9,
+        })
+    elif name == "Prodigy":
+        optimizer_kwargs.update({
+            "betas": (beta1, beta2),
+        })
+    elif name == "GaLoreAdafactor":
+        optimizer_kwargs = {
+            "lr": lr,
+            "eps": (1e-30, eps),
+            "weight_decay": weight_decay,
+            "scale_parameter": False,
+            "relative_step": False,
+            "warmup_init": False,
+        }
+
     # Initialize optimizer classes registry
     optimizer_classes = {
         "Adam": torch.optim.Adam,
@@ -501,15 +573,21 @@ def build_optimizers(
     if standard_optimizers_available:
         standard_optimizer_classes = {
             "Adam_mini": Adam_mini, "Lamb": Lamb, "Shampoo": Shampoo,
-            "GaLore_AdamW": GaLore_AdamW, "CAME": CAME, "Conda": Conda,
+            "GaLore_AdamW": GaLore_AdamW, "GaLoreAdafactor": GaLoreAdafactor,
+            "CAME": CAME, "Conda": Conda,
             "Adan": Adan, "APOLLO_AdamW": APOLLO_AdamW, "Lion": Lion,
             "MARS": MARS, "Muon": Muon, "NAdam": NAdam, "RAdam": RAdam,
-            "SophiaG": SophiaG, "SOAP": SOAP, "SCALE": SCALE, "MOGASGD": MOGASGD,
-            "RMNP": RMNP,
+            "SophiaG": SophiaG, "SOAP": SOAP,
+            "MOGASGD": MOGASGD, "SCALE": SCALE, "RMNP": RMNP,
+            "MuonOldScale": MuonOldScale, "MuonS4": MuonS4,
+            "MuonC1b": MuonC1b, "MuonBest": MuonBest,
+            "AdaBelief": AdaBelief, "AdamP": AdamP, "AdamWLegacy": AdamWLegacy,
+            "Adopt": Adopt, "Kron": Kron, "LaProp": LaProp, "LARS": LARS,
+            "NvNovoGrad": NvNovoGrad, "Prodigy": Prodigy,
         }
         optimizer_classes.update(standard_optimizer_classes)
         logger.info(f"Standard optimizers loaded: {list(standard_optimizer_classes.keys())}")
-    
+
     # Optimizer Selection and Validation
     if name not in optimizer_classes:
         # Provide detailed error message with categorized available optimizers
@@ -517,26 +595,26 @@ def build_optimizers(
             "PyTorch Built-in": ["Adam", "AdamW", "SGD", "RMSprop", "Adagrad", "Adamax"],
             "SGG Optimizers": [k for k in optimizer_classes.keys() if "SGG" in k],
             "SAC Optimizers": [k for k in optimizer_classes.keys() if "SAC" in k],
-            "Standard Optimizers": [k for k in optimizer_classes.keys() 
+            "Standard Optimizers": [k for k in optimizer_classes.keys()
                                    if k not in ["Adam", "AdamW", "SGD", "RMSprop", "Adagrad","Adamax"]
                                    and "SGG" not in k and "SAC" not in k]
         }
-        
+
         error_msg = f"Optimizer '{name}' not supported.\n\nAvailable optimizers by category:\n"
         for category, optimizers in available_optimizers.items():
             if optimizers:
                 error_msg += f"  {category}: {optimizers}\n"
-        
+
         # Add availability status for debugging
         error_msg += f"\nOptimizer availability status:\n"
         error_msg += f"  SGG optimizers available: {sgg_optimizers_available}\n"
         error_msg += f"  SAC optimizers available: {sac_optimizers_available}\n"
         error_msg += f"  Standard optimizers available: {standard_optimizers_available}\n"
-        
+
         raise NotImplementedError(error_msg)
-    
+
     optimizer_cls = optimizer_classes[name]
-    
+
     # Log optimizer selection info
     if name in ["Adam", "AdamW", "SGD", "RMSprop", "Adagrad", "Adamax"]:
         optimizer_type = "PyTorch Built-in"
@@ -566,36 +644,24 @@ def build_optimizers(
         return OptimizersContainer(model_parts, optimizer_cls, optimizer_kwargs)
 
 
-def build_muon_metrics(model):
-    muon_params = [
-        p for name, p in model.named_parameters() if p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
-    ]
-    adamw_params = [
-        p for name, p in model.named_parameters() if not (p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name)
-    ]
-    metrics = {
-        "muon_params": muon_params,
-        "adamw_params": adamw_params,
-    }
-    return metrics
-
-
 def build_scale_metrics(model):
+    """Parameter groups for SCALE (from upstream OpenToMe 721dc3b)."""
     from torch import nn
+
     main_params, secondary_params, oned_params = [], [], []
-    main_modules_list = ["attn", "mlp","attention", "embed_tokens"]
-    print(f"MAIN MODULES = {main_modules_list} !")
+    main_modules_list = ["attn", "mlp", "attention", "embed_tokens"]
+    logger.info(f"SCALE main module name substrings: {main_modules_list}")
 
     id_to_name_main_params, id_to_name_secondary_params, id_to_name_oned_params = {}, {}, {}
 
     for module_name, module in model.named_modules():
         if not (isinstance(module, nn.Linear) or isinstance(module, nn.Embedding)):
             continue
-        if not any(target_key in module_name for target_key in main_modules_list): 
+        if not any(target_key in module_name for target_key in main_modules_list):
             continue
         main_params.append(module.weight)
         id_to_name_main_params[id(module.weight)] = module_name
-        
+
     for param_name, p in model.named_parameters():
         if id(p) in id_to_name_main_params:
             continue
@@ -607,33 +673,32 @@ def build_scale_metrics(model):
             id_to_name_secondary_params[id(p)] = param_name
 
     for module_name, module in model.named_modules():
-        if hasattr(module, 'weight'):
+        if hasattr(module, "weight"):
             p = module.weight
             if id(p) in id_to_name_main_params:
-                print("Main module: ", module_name)
-            if id(p) in id_to_name_oned_params:    
-                print("1D module: ", module_name)    
-            if id(p) in id_to_name_secondary_params:    
-                print("Secondary module: ", module_name)          
-    metrics = {
+                logger.debug("SCALE main module: %s", module_name)
+            if id(p) in id_to_name_oned_params:
+                logger.debug("SCALE 1D module: %s", module_name)
+            if id(p) in id_to_name_secondary_params:
+                logger.debug("SCALE secondary module: %s", module_name)
+    return {
         "main_params": main_params,
         "secondary_params": secondary_params,
         "oned_params": oned_params,
         "id_to_name": {**id_to_name_main_params, **id_to_name_secondary_params, **id_to_name_oned_params},
     }
-    return metrics
 
 
 def build_rmnp_metrics(model):
+    """Parameter groups for RMNP (from upstream OpenToMe 721dc3b)."""
     rmnp_params, adam_params = [], []
     for name, param in model.named_parameters():
         if param.requires_grad:
-            if param.ndim >= 2 and 'embed' not in name and 'lm_head' not in name:
+            if param.ndim >= 2 and "embed" not in name and "lm_head" not in name:
                 rmnp_params.append(param)
             else:
                 adam_params.append(param)
-    metrics = {
+    return {
         "rmnp_params": rmnp_params,
         "adam_params": adam_params,
     }
-    return metrics

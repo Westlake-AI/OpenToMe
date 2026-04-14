@@ -70,7 +70,7 @@ tokenizer=$(grep -oP '(?<=--model.tokenizer_path )[^ ]+' <<< "$params")
 
 # Register all local model types once so AutoConfig can resolve custom model_type.
 model=$(
-  python -c "import fla, sys; import opentome.models" "$config" | jq -r '.model_type'
+  python -c "import json, sys; print(json.load(open('$config'))['model_type'])" 2>/dev/null || echo "unknown"
 )
 
 mkdir -p $path

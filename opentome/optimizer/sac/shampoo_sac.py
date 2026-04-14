@@ -30,7 +30,8 @@ class ShampooSAC(Optimizer):
     """
     def __init__(self, params, model, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
                  weight_decay=0.01, scale_update_freq=500, scale_bound=(0.1, 10),
-                 ns_steps=5, weight_decay_factor=0.01, verbose=False):
+                 ns_steps=5, weight_decay_factor=0.01, align_gradients=True, verbose=False,
+                 **kwargs):
         if not 0.0 <= lr:
             raise ValueError(f"Invalid learning rate: {lr}")
         if not 0.0 <= eps:
@@ -52,6 +53,7 @@ class ShampooSAC(Optimizer):
         self.verbose = verbose
         self.weight_decay_factor = weight_decay_factor
         self._step_count = 0
+        self.align_gradients = align_gradients
 
         # Align keyword sets with AdamWSAC
         self.embedding_names = {"embed_tokens"}
@@ -175,13 +177,18 @@ class ShampooSAC(Optimizer):
         return weight_decay * adjusted_ratio
 
     def _compute_scale_factors(self):
-        """Computes scale factors for layer -> block hierarchy."""
+        """Computes scale factors for layer -> block hierarchy based on gradient deviations."""
         param_map = {id(p): p for group in self.param_groups for p in group['params'] if p.grad is not None}
         if not param_map:
             return
-        eps = self.defaults['eps']
+        eps = torch.finfo(torch.float32).eps
 
-        global_distances = []
+        # Use memory-efficient approach to avoid INT_MAX elements error
+        max_elements_per_batch = 1000000  # 1M elements per batch to avoid memory issues
+        global_median_distance = eps
+
+        # Collect all block-level statistics first
+        block_stats = []
         for l, blocks in self.structure_mapping.items():
             for b, param_ids in blocks.items():
                 block_grads = []
@@ -197,47 +204,90 @@ class ShampooSAC(Optimizer):
                     block_grads_cat = torch.cat(block_grads)
                     block_center = block_grads_cat.mean()
                     block_distances = (block_grads_cat - block_center).abs()
-                    global_distances.append(block_distances)
+                    block_median = block_distances.median()
+                    block_stats.append({
+                        'layer': l,
+                        'block': b,
+                        'median': block_median.item(),
+                        'size': block_distances.numel()
+                    })
 
-        if not global_distances:
+        if not block_stats:
             return
-        global_distances = torch.cat(global_distances)
-        global_median_distance = max(global_distances.median(), eps)
 
+        # Compute global median using weighted approach to avoid large tensor concatenation
+        total_elements = sum(stat['size'] for stat in block_stats)
+        if total_elements > max_elements_per_batch:
+            # For large models, use sampling-based approach
+            sample_size = min(max_elements_per_batch, total_elements // 10)
+            sampled_medians = []
+
+            for stat in block_stats:
+                # Sample proportionally from each block
+                block_sample_size = max(1, int(sample_size * stat['size'] / total_elements))
+                # Use the block median as representative
+                sampled_medians.extend([stat['median']] * block_sample_size)
+
+            if sampled_medians:
+                global_median_distance = max(torch.tensor(sampled_medians).median().item(), eps)
+        else:
+            # For small models, use original approach
+            all_medians = [stat['median'] for stat in block_stats]
+            global_median_distance = max(torch.tensor(all_medians).median().item(), eps)
+
+        # Compute layer-wise and block-wise scales
         new_raw_scales = defaultdict(lambda: defaultdict(lambda: 1.0))
         for l, blocks in self.structure_mapping.items():
-            layer_grads = []
-            layer_distances = []
+            layer_block_stats = []
             for b, param_ids in blocks.items():
                 block_grads = []
                 for param_id in param_ids:
                     if param_id in param_map and self.param_to_structure[param_id]['is_scalable']:
                         grad = param_map[param_id].grad
-                        p = param_map[param_id]
-                        param_size = torch.tensor(p.numel(), dtype=torch.float32, device=grad.device)
-                        normalized_grad = grad / torch.sqrt(param_size + eps)
-                        aligned_grad = self._align_gradients(p, normalized_grad)
+                        aligned_grad = self._align_gradients(param_map[param_id], grad)
                         block_grads.append(aligned_grad.view(-1))
                 if block_grads:
                     block_grads_cat = torch.cat(block_grads)
-                    layer_grads.append(block_grads_cat)
                     block_center = block_grads_cat.mean()
                     block_distances = (block_grads_cat - block_center).abs()
-                    median_distance = max(block_distances.median(), eps)
-                    mad = torch.median(torch.abs(block_distances - median_distance)) + eps
+                    mad = torch.median(torch.abs(block_distances - block_distances.median())) + eps
                     scale_adjustment = torch.log1p(block_distances / mad).mean().item()
                     new_raw_scales[l][b] = scale_adjustment
-                    layer_distances.append(block_distances)
 
-            if layer_grads:
-                layer_distances = torch.cat(layer_distances)
-                layer_median_distance = max(layer_distances.median(), eps)
+                    layer_block_stats.append({
+                        'block': b,
+                        'median': block_distances.median().item(),
+                        'size': block_distances.numel(),
+                        'center': block_center.item()
+                    })
+
+            if layer_block_stats:
+                # Compute layer-level statistics using representative sampling
+                total_layer_elements = sum(stat['size'] for stat in layer_block_stats)
+                if total_layer_elements > max_elements_per_batch:
+                    # For large layers, use weighted median approach
+                    layer_median_distance = eps
+                    weighted_medians = []
+                    for stat in layer_block_stats:
+                        weight = stat['size'] / total_layer_elements
+                        weighted_medians.extend([stat['median']] * max(1, int(weight * 1000)))
+                    if weighted_medians:
+                        layer_median_distance = max(torch.tensor(weighted_medians).median().item(), eps)
+                else:
+                    # For small layers, use original approach
+                    layer_medians = [stat['median'] for stat in layer_block_stats]
+                    layer_median_distance = max(torch.tensor(layer_medians).median().item(), eps)
+
                 layer_scale = global_median_distance / layer_median_distance if layer_median_distance > 0 else 1.0
+
+                # Apply layer scale to block adjustments
                 for b in blocks:
                     if b in new_raw_scales[l]:
                         combined_scale = layer_scale * new_raw_scales[l][b]
-                        new_raw_scales[l][b] = max(self.scale_bound[0], min(self.scale_bound[1], combined_scale))
+                        bounded_scale = max(self.scale_bound[0], min(self.scale_bound[1], combined_scale))
+                        new_raw_scales[l][b] = bounded_scale
 
+        # Update scales
         self._update_ema_scales(new_raw_scales)
 
     def _update_ema_scales(self, new_raw_scales, beta=0.9):
@@ -258,11 +308,12 @@ class ShampooSAC(Optimizer):
         """Helper to get structural details for a parameter."""
         return self.param_to_structure.get(id(p))
 
+    @torch.compile
     def _align_gradients(self, p, grad):
         """Aligns gradients with parameters."""
         param_norm = p.data.norm(2)
         grad_norm = grad.norm(2)
-        ratio = (param_norm + self.defaults['eps']) / (grad_norm + self.defaults['eps'])
+        ratio = (param_norm + 1e-8) / (grad_norm + 1e-8)
         alignment_factor = torch.log1p(ratio)
         alignment_factor = torch.clamp(alignment_factor, 0.1, 10)
         return grad * alignment_factor
@@ -276,7 +327,7 @@ class ShampooSAC(Optimizer):
                 loss = closure()
 
         self._step_count += 1
-        if self._step_count % self.scale_update_freq == 0:
+        if self._step_count % self.scale_update_freq == 1:
             self._compute_scale_factors()
 
         for group in self.param_groups:
@@ -286,6 +337,9 @@ class ShampooSAC(Optimizer):
                 grad = p.grad
                 if grad.is_sparse:
                     raise RuntimeError('SAC_Shampoo does not support sparse gradients')
+
+                # Apply gradient alignment
+                aligned_grad = self._align_gradients(p, grad)
 
                 state = self.state[p]
                 if len(state) == 0:
@@ -299,8 +353,8 @@ class ShampooSAC(Optimizer):
                 bias_correction1 = 1 - beta1 ** state['step']
                 bias_correction2 = 1 - beta2 ** state['step']
 
-                exp_avg.mul_(beta1).add_(grad, alpha=1 - beta1)
-                exp_avg_sq.mul_(beta2).addcmul_(grad, grad, value=1 - beta2)
+                exp_avg.mul_(beta1).add_(aligned_grad, alpha=1 - beta1)
+                exp_avg_sq.mul_(beta2).addcmul_(aligned_grad, aligned_grad, value=1 - beta2)
 
                 denom = (exp_avg_sq.sqrt() / math.sqrt(bias_correction2)).add_(group['eps'])
                 update = exp_avg / denom

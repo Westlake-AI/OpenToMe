@@ -3,10 +3,7 @@
 import math
 import torch
 from torch.optim.optimizer import Optimizer
-import os
-import numpy as np
-import math
-# from megatron.optimizer.l2_norm import l2_norm
+
 
 def exists(val):
     return val is not None
@@ -52,21 +49,24 @@ def update_fn(p, grad, exp_avg, exp_avg_sq, lr, wd, beta1, beta2, last_grad, eps
         p.data.add_(real_update_tmp)
     return exp_avg, exp_avg_sq
 
+
 class MARS(Optimizer):
-    def __init__(self, 
-                 params,
-                 lr=3e-3, 
-                 betas=(0.95, 0.99), 
-                 eps=1e-8, 
-                 weight_decay=0., 
-                 amsgrad=False, 
-                 gamma=0.025, 
-                 is_approx=True, 
-                 mars_type="mars-adamw", 
-                 optimize_1d=False, 
-                 lr_1d=3e-3, 
-                 betas_1d=(0.9, 0.95), 
-                 weight_decay_1d=0.1):
+    """
+    Implements MARS algorithm (https://arxiv.org/abs/2411.10438).
+
+    Arguments:
+        params (`Iterable[nn.parameter.Parameter]`):
+            Iterable of parameters to optimize or dictionaries defining parameter groups.
+        lr (`float`, *optional*, defaults to 0.003):
+            The learning rate to use.
+        betas (`Tuple[float,float]`, *optional*, defaults to `(0.95, 0.95)`):
+        eps (`float`, *optional*, defaults to 1e-08): Adam's epsilon for numerical stability.
+        weight_decay (`float`, *optional*, defaults to 0.01): weight decay coefficient.
+    """
+    def __init__(
+        self, params, lr=3e-3, betas=(0.95, 0.99), eps=1e-8, weight_decay=0., amsgrad=False, gamma=0.025, 
+        is_approx=True, mars_type="mars-adamw", optimize_1d=False, lr_1d=3e-3, betas_1d=(0.9, 0.95), weight_decay_1d=0.1
+    ):
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if not 0.0 <= eps:
