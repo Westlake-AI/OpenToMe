@@ -457,6 +457,21 @@ class JobConfig:
             action="store_true",
             help="Use deterministic algorithms wherever possible, may be slower",
         )
+        # ------ jinxin ------ #
+        self.parser.add_argument(
+            "--training.val_times",
+            type=int,
+            default=0,
+            help="Number of times to evaluate val PPL during training. 0 means no intermediate eval. "
+                 "e.g. 10 means evaluate every (total_steps // 10) steps.",
+        )
+        self.parser.add_argument(
+            "--training.val_data_dir",
+            type=str,
+            default=None,
+            help="Path to the validation data directory containing parquet files. "
+                 "If None, defaults to 'data/wiki_val/' relative to cwd.",
+        )
         # metrics configs
         self.parser.add_argument(
             "--metrics.log_freq",

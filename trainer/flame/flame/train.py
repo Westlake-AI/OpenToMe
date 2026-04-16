@@ -5,15 +5,17 @@
 # LICENSE file in the root directory of this source tree.
 
 import json
+import math
 import os
 import time
 
 # Per-rank Triton/Inductor cache. Shared /tmp/triton_cache_* under DDP + torch.compile
 # races in torch._inductor (FileExistsError on os.replace); set before import torch.
-_lr_triton = os.environ.get("LOCAL_RANK")
-if _lr_triton is not None:
-    _td = os.environ.get("TRITON_CACHE_DIR", "/tmp/triton_inductor")
-    os.environ["TRITON_CACHE_DIR"] = f"{_td}_r{_lr_triton}"
+# _lr_triton = os.environ.get("LOCAL_RANK")
+# if _lr_triton is not None:
+#     _td = os.environ.get("TRITON_CACHE_DIR", "/tmp/triton_inductor")
+#     os.environ["TRITON_CACHE_DIR"] = f"{_td}_r{_lr_triton}"
+
 from datetime import timedelta
 
 import fla  # noqa
@@ -88,6 +90,102 @@ from flame.tools.utils import get_nparams_and_flops
 
 def build_tokenizer(job_config: JobConfig) -> AutoTokenizer:
     return AutoTokenizer.from_pretrained(job_config.model.tokenizer_path)
+
+# ------ jinxin ------ #
+def evaluate_ppl(
+    model,
+    tokenizer,
+    val_data_path: str,
+    batch_size: int,
+    seq_len: int,
+    device,
+    device_type: str,
+    world_mesh,
+    parallel_dims,
+    maybe_enable_amp,
+    color,
+    step: int,
+) -> float:
+    """
+    Evaluation function for PPL on validation set.
+    Supports two formats:
+      - parquet file (e.g. wiki_val): val_data_path ends with .parquet
+      - json.gz glob (e.g. C4 val): val_data_path is a glob pattern like /path/to/c4-validation.*.json.gz
+    """
+    model.eval()
+
+    # Load texts depending on file format
+    if val_data_path.endswith(".parquet"):
+        import pandas as pd
+        df = pd.read_parquet(val_data_path)
+        texts = df["text"].tolist()
+    else:
+        # Treat as a glob pattern for json.gz files (e.g. C4 validation)
+        from datasets import load_dataset
+        ds = load_dataset("json", data_files=val_data_path, split="train", streaming=True)
+        texts = [sample["text"] for sample in ds]
+
+    # Split by dp_rank / dp_degree
+    if parallel_dims.dp_enabled:
+        dp_mesh = world_mesh["dp"]
+        dp_degree = dp_mesh.size()
+        dp_rank = dp_mesh.get_local_rank()
+    else:
+        dp_degree, dp_rank = 1, 0
+
+    texts_for_rank = texts[dp_rank::dp_degree]
+
+    # Tokenize and concatenate into token buffer, then cut into seq_len chunks
+    token_buffer = []
+    for text in texts_for_rank:
+        ids = tokenizer(text, return_attention_mask=False)["input_ids"]
+        token_buffer.extend(ids)
+
+    chunks = [
+        token_buffer[i : i + seq_len]
+        for i in range(0, len(token_buffer) - seq_len, seq_len)
+    ]
+
+    total_loss = torch.tensor(0.0, device=device)
+    total_tokens = torch.tensor(0, device=device, dtype=torch.long)
+
+    with torch.no_grad():
+        for i in range(0, len(chunks), batch_size):
+            batch_chunks = chunks[i : i + batch_size]
+            if not batch_chunks:
+                continue
+            input_ids = torch.tensor(batch_chunks, dtype=torch.long, device=device_type)
+            labels = input_ids.clone()
+            position_ids = (
+                torch.arange(0, input_ids.shape[1], device=device_type)
+                .repeat(input_ids.shape[0], 1)
+                .to(torch.int32)
+            )
+            with maybe_enable_amp:
+                output = model(
+                    input_ids=input_ids,
+                    labels=labels,
+                    position_ids=position_ids,
+                )
+            # output.loss is the mean token loss for this batch
+            n_tokens = labels.numel()
+            total_loss += output.loss.detach() * n_tokens
+            total_tokens += n_tokens
+
+    # all-reduce SUM across all dp ranks, then divide by total_tokens
+    if parallel_dims.dp_enabled:
+        torch.distributed.all_reduce(total_loss, group=world_mesh["dp"].get_group())
+        torch.distributed.all_reduce(total_tokens, group=world_mesh["dp"].get_group())
+
+    avg_loss = (
+        (total_loss / total_tokens).item()
+        if total_tokens.item() > 0
+        else float("inf")
+    )
+    ppl = math.exp(avg_loss)
+
+    model.train()
+    return ppl
 
 
 register_train_spec(
@@ -452,6 +550,38 @@ def main(job_config: JobConfig):
         * job_config.training.gradient_accumulation_steps
     )
     num_tokens_per_step = global_batch_size * job_config.training.seq_len
+
+    # ------ jinxin ------ #
+    # PPL related configurations for validation
+    val_times = getattr(job_config.training, "val_times", 0)
+    val_interval = (job_config.training.steps // val_times) if val_times > 0 else 0
+    val_data_dir = getattr(job_config.training, "val_data_dir", None)
+
+    if val_data_dir is not None:    # User explicitly specified val data path
+        if os.path.isfile(val_data_dir):    # Directly passed file path (e.g. parquet)
+            val_parquet = val_data_dir
+        elif val_data_dir.endswith(".json.gz") or "*" in val_data_dir:    # Passed is a glob pattern
+            val_parquet = val_data_dir
+        else:    # Passed is a directory, automatically find parquet file
+            val_parquet = os.path.join(val_data_dir, "validation-00000-of-00001.parquet")
+    else:
+        # Not specified val_data_dir, automatically select based on training dataset
+        training_dataset = getattr(job_config.training, "dataset", "")
+        training_data_files = getattr(job_config.training, "data_files", "") or ""
+        training_data_dir_cfg = getattr(job_config.training, "data_dir", "") or ""
+        is_c4 = (
+            training_dataset == "json" and ("c4" in training_data_files.lower() or "c4" in training_data_dir_cfg.lower())
+        )
+        if is_c4:    # C4 training, default to use C4 built-in validation set
+            if training_data_files and "c4" in training_data_files.lower():
+                c4_dir = os.path.dirname(training_data_files.split(",")[0])
+            else:
+                c4_dir = training_data_dir_cfg.split(",")[0]
+            val_parquet = os.path.join(c4_dir, "c4-validation.*.json.gz")
+            logger.info(f"{color.yellow}C4 training detected: using C4 built-in validation set for PPL eval: {val_parquet}{color.reset}")
+        else:   # Default to use wiki_val
+            val_parquet = os.path.join(os.getcwd(), "data/wiki_val", "validation-00000-of-00001.parquet")
+
     # train loop
     logger.info(f"{color.red}***** Running training *****{color.reset}")
     logger.info(f"{color.green}  Training starts at step {train_state.step + 1}")
@@ -479,6 +609,13 @@ def main(job_config: JobConfig):
     logger.info(
         f"{color.green}  Number of parameters = {model_param_count:,} {color.reset}"
     )
+
+    # ------ jinxin ------ #
+    if val_interval > 0:
+        logger.info(
+            f"{color.green}Val PPL will be computed every {val_interval} steps "
+            f"({val_times} times total). Val data: {val_parquet}{color.reset}"
+        )
 
     with (
         maybe_enable_profiling(
@@ -679,6 +816,29 @@ def main(job_config: JobConfig):
                 train_state.step, force=(train_state.step == job_config.training.steps)
             )
 
+            # ------ jinxin ------ #
+            # Compute validation PPL during training by val_interval
+            if val_interval > 0 and train_state.step % val_interval == 0:
+                val_ppl = evaluate_ppl(
+                    model=model_parts[0],
+                    tokenizer=tokenizer,
+                    val_data_path=val_parquet,
+                    batch_size=job_config.training.batch_size,
+                    seq_len=job_config.training.seq_len,
+                    device=device,
+                    device_type=device_type,
+                    world_mesh=world_mesh,
+                    parallel_dims=parallel_dims,
+                    maybe_enable_amp=maybe_enable_amp,
+                    color=color,
+                    step=train_state.step,
+                )
+                if torch.distributed.get_rank() == 0:
+                    logger.info(
+                        f"{color.cyan}[Val PPL] step={train_state.step} | PPL={val_ppl:.4f}{color.reset}"
+                    )
+                metric_logger.logger.log({"val/ppl": val_ppl}, train_state.step)
+
             # signal the profiler that the next profiling step has started
             if torch_profiler:
                 torch_profiler.step()
@@ -696,6 +856,29 @@ def main(job_config: JobConfig):
     if torch.distributed.get_rank() == 0:
         logger.info("Sleeping 2 seconds for other ranks to complete")
         time.sleep(2)
+
+    # ------ jinxin ------ #
+    # Compute final validation PPL on wiki_val after training
+    logger.info("Computing final validation PPL on wiki_val...")
+    final_val_ppl = evaluate_ppl(
+        model=model_parts[0],
+        tokenizer=tokenizer,
+        val_data_path=val_parquet,
+        batch_size=job_config.training.batch_size,
+        seq_len=job_config.training.seq_len,
+        device=device,
+        device_type=device_type,
+        world_mesh=world_mesh,
+        parallel_dims=parallel_dims,
+        maybe_enable_amp=maybe_enable_amp,
+        color=color,
+        step=job_config.training.steps,
+    )
+    if torch.distributed.get_rank() == 0:
+        logger.info(
+            f"{color.cyan}[Final Val PPL] step={job_config.training.steps} | PPL={final_val_ppl:.4f}{color.reset}"
+        )
+    metric_logger.logger.log({"val/ppl_final": final_val_ppl}, job_config.training.steps)
 
     metric_logger.close()
     logger.info("Training completed")
