@@ -91,7 +91,70 @@ from flame.tools.utils import get_nparams_and_flops
 def build_tokenizer(job_config: JobConfig) -> AutoTokenizer:
     return AutoTokenizer.from_pretrained(job_config.model.tokenizer_path)
 
+
 # ------ jinxin ------ #
+def build_val_chunks_cache(
+    val_data_path: str,
+    tokenizer,
+    seq_len: int,
+    world_mesh,
+    parallel_dims,
+    c4_target_eval_tokens: int = 10_000_000,
+) -> "list[list[int]]":
+    """
+    Load, tokenize, and chunk the validation set exactly once before training.
+    Returns a list of token-id chunks (each of length seq_len) for this dp rank.
+
+    - parquet (wiki_val): full set, sharded by dp_rank
+    - json.gz glob (C4): streaming, capped at c4_target_eval_tokens per rank
+    """
+    if parallel_dims.dp_enabled:
+        dp_degree = world_mesh["dp"].size()
+        dp_rank   = world_mesh["dp"].get_local_rank()
+    else:
+        dp_degree, dp_rank = 1, 0
+
+    is_c4 = not val_data_path.endswith(".parquet")
+
+    # 1. Load texts
+    if not is_c4:
+        import pandas as pd
+        df = pd.read_parquet(val_data_path)
+        texts = df["text"].tolist()[dp_rank::dp_degree]
+    else:
+        from datasets import load_dataset
+        ds = load_dataset("json", data_files=val_data_path, split="train", streaming=True)
+        texts = []
+        tok_est = 0
+        for idx, sample in enumerate(ds):
+            if idx % dp_degree != dp_rank:
+                continue
+            texts.append(sample["text"])
+            tok_est += len(sample["text"]) // 4  # ~4 chars per token
+            if c4_target_eval_tokens > 0 and tok_est >= c4_target_eval_tokens + seq_len:
+                break
+
+    # 2. Batched tokenization (512 texts per call)
+    token_buffer: list[int] = []
+    for i in range(0, len(texts), 512):
+        batch_ids = tokenizer(
+            texts[i : i + 512],
+            return_attention_mask=False,
+            add_special_tokens=False,
+        )["input_ids"]
+        for ids in batch_ids:
+            token_buffer.extend(ids)
+        if is_c4 and c4_target_eval_tokens > 0 and len(token_buffer) >= c4_target_eval_tokens + seq_len:
+            break
+
+    # 3. Cut into non-overlapping seq_len chunks
+    chunks = [
+        token_buffer[i : i + seq_len]
+        for i in range(0, len(token_buffer) - seq_len, seq_len)
+    ]
+    return chunks
+
+
 def evaluate_ppl(
     model,
     tokenizer,
@@ -99,33 +162,27 @@ def evaluate_ppl(
     batch_size: int,
     seq_len: int,
     device,
-    device_type: str,
+    device_type: str,  # kept for call-site compatibility, unused internally
     world_mesh,
     parallel_dims,
     maybe_enable_amp,
     color,
     step: int,
+    chunks_cache: "list[list[int]] | None" = None,
 ) -> float:
     """
     Evaluation function for PPL on validation set.
-    Supports two formats:
-      - parquet file (e.g. wiki_val): val_data_path ends with .parquet
-      - json.gz glob (e.g. C4 val): val_data_path is a glob pattern like /path/to/c4-validation.*.json.gz
+
+    When chunks_cache is provided (pre-built in main before the train loop),
+    all IO and tokenization is skipped — only the forward pass runs.
+    This is the fast path used during training.
+
+    Without cache (chunks_cache=None), falls back to loading from disk:
+      - parquet (wiki_val): full set, no token budget
+      - json.gz glob (C4): streaming, 10M-token budget per rank
     """
     model.eval()
 
-    # Load texts depending on file format
-    if val_data_path.endswith(".parquet"):
-        import pandas as pd
-        df = pd.read_parquet(val_data_path)
-        texts = df["text"].tolist()
-    else:
-        # Treat as a glob pattern for json.gz files (e.g. C4 validation)
-        from datasets import load_dataset
-        ds = load_dataset("json", data_files=val_data_path, split="train", streaming=True)
-        texts = [sample["text"] for sample in ds]
-
-    # Split by dp_rank / dp_degree
     if parallel_dims.dp_enabled:
         dp_mesh = world_mesh["dp"]
         dp_degree = dp_mesh.size()
@@ -133,19 +190,54 @@ def evaluate_ppl(
     else:
         dp_degree, dp_rank = 1, 0
 
-    texts_for_rank = texts[dp_rank::dp_degree]
+    # ------------------------------------------------------------------ #
+    # 1. Get chunks — from cache (fast) or disk (slow, fallback only)     #
+    # ------------------------------------------------------------------ #
+    if chunks_cache is not None:
+        chunks = chunks_cache  # zero IO, zero tokenization
+    else:
+        # Fallback: load from disk (only used if cache was not built)
+        C4_TARGET_EVAL_TOKENS = 10_000_000
+        is_c4 = not val_data_path.endswith(".parquet")
 
-    # Tokenize and concatenate into token buffer, then cut into seq_len chunks
-    token_buffer = []
-    for text in texts_for_rank:
-        ids = tokenizer(text, return_attention_mask=False)["input_ids"]
-        token_buffer.extend(ids)
+        if not is_c4:
+            import pandas as pd
+            df = pd.read_parquet(val_data_path)
+            texts_for_rank = df["text"].tolist()[dp_rank::dp_degree]
+        else:
+            from datasets import load_dataset
+            ds = load_dataset("json", data_files=val_data_path, split="train", streaming=True)
+            texts_for_rank = []
+            token_estimate = 0
+            for idx, sample in enumerate(ds):
+                if idx % dp_degree != dp_rank:
+                    continue
+                texts_for_rank.append(sample["text"])
+                token_estimate += len(sample["text"]) // 4
+                if C4_TARGET_EVAL_TOKENS > 0 and token_estimate >= C4_TARGET_EVAL_TOKENS + seq_len:
+                    break
 
-    chunks = [
-        token_buffer[i : i + seq_len]
-        for i in range(0, len(token_buffer) - seq_len, seq_len)
-    ]
+        TOKENIZE_BATCH = 512
+        token_buffer = []
+        for i in range(0, len(texts_for_rank), TOKENIZE_BATCH):
+            batch_ids = tokenizer(
+                texts_for_rank[i : i + TOKENIZE_BATCH],
+                return_attention_mask=False,
+                add_special_tokens=False,
+            )["input_ids"]
+            for ids in batch_ids:
+                token_buffer.extend(ids)
+            if is_c4 and C4_TARGET_EVAL_TOKENS > 0 and len(token_buffer) >= C4_TARGET_EVAL_TOKENS + seq_len:
+                break
 
+        chunks = [
+            token_buffer[i : i + seq_len]
+            for i in range(0, len(token_buffer) - seq_len, seq_len)
+        ]
+
+    # ------------------------------------------------------------------ #
+    # 2. Forward pass over all chunks                                     #
+    # ------------------------------------------------------------------ #
     total_loss = torch.tensor(0.0, device=device)
     total_tokens = torch.tensor(0, device=device, dtype=torch.long)
 
@@ -154,10 +246,10 @@ def evaluate_ppl(
             batch_chunks = chunks[i : i + batch_size]
             if not batch_chunks:
                 continue
-            input_ids = torch.tensor(batch_chunks, dtype=torch.long, device=device_type)
+            input_ids = torch.tensor(batch_chunks, dtype=torch.long, device=device)
             labels = input_ids.clone()
             position_ids = (
-                torch.arange(0, input_ids.shape[1], device=device_type)
+                torch.arange(0, input_ids.shape[1], device=device)
                 .repeat(input_ids.shape[0], 1)
                 .to(torch.int32)
             )
@@ -167,12 +259,13 @@ def evaluate_ppl(
                     labels=labels,
                     position_ids=position_ids,
                 )
-            # output.loss is the mean token loss for this batch
             n_tokens = labels.numel()
             total_loss += output.loss.detach() * n_tokens
             total_tokens += n_tokens
 
-    # all-reduce SUM across all dp ranks, then divide by total_tokens
+    # ------------------------------------------------------------------ #
+    # 3. All-reduce across dp ranks                                       #
+    # ------------------------------------------------------------------ #
     if parallel_dims.dp_enabled:
         torch.distributed.all_reduce(total_loss, group=world_mesh["dp"].get_group())
         torch.distributed.all_reduce(total_tokens, group=world_mesh["dp"].get_group())
@@ -582,6 +675,24 @@ def main(job_config: JobConfig):
         else:   # Default to use wiki_val
             val_parquet = os.path.join(os.getcwd(), "data/wiki_val", "validation-00000-of-00001.parquet")
 
+    # ------ jinxin ------ #
+    # Pre-cache val chunks once before training — each evaluate_ppl call reuses
+    # this cache with zero IO / tokenization overhead.
+    C4_TARGET_EVAL_TOKENS = 10_000_000
+    logger.info(f"{color.yellow}Pre-caching val chunks from {val_parquet} ...{color.reset}")
+    val_chunks_cache = build_val_chunks_cache(
+        val_data_path=val_parquet,
+        tokenizer=tokenizer,
+        seq_len=job_config.training.seq_len,
+        world_mesh=world_mesh,
+        parallel_dims=parallel_dims,
+        c4_target_eval_tokens=C4_TARGET_EVAL_TOKENS,
+    )
+    logger.info(
+        f"{color.yellow}Val cache ready: {len(val_chunks_cache)} chunks "
+        f"({len(val_chunks_cache) * job_config.training.seq_len:,} tokens per rank){color.reset}"
+    )
+
     # train loop
     logger.info(f"{color.red}***** Running training *****{color.reset}")
     logger.info(f"{color.green}  Training starts at step {train_state.step + 1}")
@@ -818,7 +929,8 @@ def main(job_config: JobConfig):
 
             # ------ jinxin ------ #
             # Compute validation PPL during training by val_interval
-            if val_interval > 0 and train_state.step % val_interval == 0:
+            # if val_interval > 0 and train_state.step % val_interval == 0:
+            if val_interval - 1 > 0 and train_state.step % val_interval == 0:
                 val_ppl = evaluate_ppl(
                     model=model_parts[0],
                     tokenizer=tokenizer,
@@ -832,6 +944,7 @@ def main(job_config: JobConfig):
                     maybe_enable_amp=maybe_enable_amp,
                     color=color,
                     step=train_state.step,
+                    chunks_cache=val_chunks_cache,
                 )
                 if torch.distributed.get_rank() == 0:
                     logger.info(
@@ -873,6 +986,7 @@ def main(job_config: JobConfig):
         maybe_enable_amp=maybe_enable_amp,
         color=color,
         step=job_config.training.steps,
+        chunks_cache=val_chunks_cache,
     )
     if torch.distributed.get_rank() == 0:
         logger.info(
