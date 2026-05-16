@@ -1,15 +1,20 @@
 #!/bin/bash
-# bash c100_old.sh 2>&1 | tee train_log_$(date +%Y%m%d_%H%M%S).txt
+# ======================================================================
+# A5 终点 — CLSHybridToMeModel (hybridtomevit_small_cls)
+# Local: DTEM soft merge | topk + center-of-mass sort | encode cross-attn
+# Latent: LatentEncoder(ToME) | Forward: full MergeNet pipeline
+# ======================================================================
+# bash c100_a5.sh 2>&1 | tee train_log_A5_$(date +%Y%m%d_%H%M%S).txt
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 export HF_ENDPOINT=https://hf-mirror.com
 
 DATA_DIR=/liziqing/yuhao/yukai/data
 OUTPUT_DIR=./work_dirs/classification
-EXP_NAME=cifar100_mergenet_small_old_quick30e_local11
+EXP_NAME=cifar100_A5
 
-# Use old HybridToMe implementation, add one extra local block
-OPENTOME_MERGENET_IMPL=old CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node 1 "${SCRIPT_DIR}/in1k_trainer.py" \
+CUDA_VISIBLE_DEVICES=4,5 torchrun --standalone --nproc_per_node 2 \
+  "${SCRIPT_DIR}/in1k_trainer.py" \
   --data_dir ${DATA_DIR} \
   --dataset CIFAR100 \
   --train_split train \
@@ -20,19 +25,18 @@ OPENTOME_MERGENET_IMPL=old CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_
   --patch_size 8 \
   --dtem_t 2 \
   --dtem_feat_dim 64 \
+  --dtem_window_size 16 \
   --lambda_local 4.0 \
   --total_merge_latent 0 \
   --use_softkmax \
-  --swa_size 256 \
-  --num_local_blocks 1 \
   --batch_size 50 \
-  --epochs 30 \
-  --lr 5e-4 \
-  --lr_local 5e-4 \
+  --epochs 200 \
+  --lr 1e-3 \
+  --lr_local 1e-3 \
   --weight_decay 0.05 \
-  --dtem_window_size 16 \
   --sched cosine \
-  --warmup_epochs 3 \
+  --clip_grad 1.0 \
+  --warmup_epochs 5 \
   --mixup 0.8 \
   --cutmix 1.0 \
   --smoothing 0.1 \
@@ -41,4 +45,4 @@ OPENTOME_MERGENET_IMPL=old CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_
   --amp \
   --output ${OUTPUT_DIR} \
   --experiment ${EXP_NAME} \
-  --seed 42 \
+  --seed 42

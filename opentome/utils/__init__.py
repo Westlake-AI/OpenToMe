@@ -6,7 +6,8 @@ from .accuracy import accuracy_one_hot, accuracy_mixup, accuracy_semantic_softma
 from .dataset_loader import create_dataset, build_dataset
 from .timer import Timer
 from .thetopk import ThreTopK
-from .optimization import create_optimizer_with_encoder_lr
+# Avoid eager import: optimization pulls torchtitan (optional) and breaks lightweight imports.
+# Use: from opentome.utils.optimization import create_optimizer_with_encoder_lr
 
 __all__ = [
     'accuracy_one_hot', 'accuracy_mixup', 'accuracy_semantic_softmax',
@@ -15,5 +16,4 @@ __all__ = [
     # 'ThroughputBenchmark',
     'Timer',
     'ThreTopK',
-    'create_optimizer_with_encoder_lr'
 ]

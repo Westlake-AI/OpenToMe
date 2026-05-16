@@ -21,6 +21,7 @@ from opentome.tome.tome import (
     local_bipartite_soft_matching,
 )
 from opentome.timm import Attention, Block
+from opentome.timm.bias_local_attn import ToMeLocalAttention
 
 try:
     from flash_attn import flash_attn_func
@@ -136,6 +137,103 @@ class ToMeBlock(Block):
             x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
 
         x = x + self._drop_path2(self.ls2(self.mlp(self.norm2(x))))
+        return x
+
+
+class ToMeLocalBlock(nn.Module):
+    """
+    Local-window self-attention + ToMe merge between attention and MLP（与 ToMeBlock 同序，注意力换为窗口版）。
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
+        proj_drop: float = 0.0,
+        attn_drop: float = 0.0,
+        init_values: Optional[float] = None,
+        drop_path: float = 0.0,
+        act_layer: type = nn.GELU,
+        norm_layer: Optional[type] = None,
+        local_window: int = 16,
+    ) -> None:
+        super().__init__()
+        if norm_layer is None:
+            from timm.layers.norm import LayerNorm
+
+            norm_layer = LayerNorm
+        from timm.layers import Mlp, DropPath
+        from timm.models.vision_transformer import LayerScale
+
+        self.norm1 = norm_layer(dim)
+        self.attn = ToMeLocalAttention(
+            dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            qk_norm=qk_norm,
+            attn_drop=attn_drop,
+            proj_drop=proj_drop,
+            norm_layer=norm_layer,
+            local_window=local_window,
+        )
+        self.ls1 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+        self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+        self.norm2 = norm_layer(dim)
+        self.mlp = Mlp(
+            in_features=dim,
+            hidden_features=int(dim * mlp_ratio),
+            act_layer=act_layer,
+            drop=proj_drop,
+        )
+        self.ls2 = LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+        self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        attn_size = self._tome_info["size"] if self._tome_info["prop_attn"] else None
+        x_attn, metric = self.attn(self.norm1(x), attn_size)
+        assert isinstance(metric["metric"], (float, torch.Tensor)), "metric not a float or torch.Tensor"
+        x = x + self.drop_path1(self.ls1(x_attn))
+        r = self._tome_info["r"].pop(0)
+
+        if r > 0:
+            window_size = self._tome_info.get("window_size")
+            use_naive_local = self._tome_info.get("use_naive_local", False)
+            metric_val = metric["metric"]
+            class_token = self._tome_info["class_token"]
+            distill_token = self._tome_info["distill_token"]
+
+            if window_size is not None and window_size >= 0:
+                if use_naive_local:
+                    merge, _, current_level_map = naive_local_bipartite_soft_matching(
+                        metric_val, r, window_size, class_token, distill_token
+                    )
+                else:
+                    merge, _, current_level_map = local_bipartite_soft_matching(
+                        metric_val, r, window_size, class_token, distill_token
+                    )
+            else:
+                merge, _, current_level_map = bipartite_soft_matching(
+                    metric_val, r, class_token, distill_token
+                )
+
+            if self._tome_info["trace_source"]:
+                if self._tome_info["source_tracking_mode"] == "map":
+                    source_map = self._tome_info["source_map"]
+                    if source_map is None:
+                        b, t, _ = x.shape
+                        source_map = torch.arange(t, device=x.device, dtype=torch.long).expand(b, -1)
+                    self._tome_info["source_map"] = merge_source_map(current_level_map, x, source_map)
+                else:
+                    source_matrix = self._tome_info["source_matrix"]
+                    self._tome_info["source_matrix"] = merge_source_matrix(merge, x, source_matrix)
+
+            x, self._tome_info["size"] = merge_wavg(merge, x, self._tome_info["size"])
+
+        x = x + self.drop_path2(self.ls2(self.mlp(self.norm2(x))))
         return x
 
 
