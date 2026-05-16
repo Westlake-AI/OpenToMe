@@ -1,43 +1,49 @@
 #!/bin/bash
-# bash c100_deit_200e.sh 2>&1 | tee train_log_$(date +%Y%m%d_%H%M%S).txt
+# bash c100_new_200e_dtem8.sh 2>&1 | tee train_log_$(date +%Y%m%d_%H%M%S).txt
 #
-# DeiT-Small baseline 对照组，用于与 c100_a200e_then_merge200e.sh
+# 单阶段 mergenet (HybridToMe) 对照组，用于与 c100_a200e_then_merge200e.sh
 # (stage1 200e branch_a + stage2 200e dual_ab merge, 总预算 400 epochs)
-# 做"同训练预算下方法 vs 标准 ViT/DeiT"的公平对比。
+# 做"同训练预算下方法 vs 单阶段 mergenet"的公平对比。
 #
 # 与 c100_a200e_then_merge200e.sh 严格对齐的项：
 #   - 数据/增强/seed:        CIFAR100 / mixup0.8 / cutmix1.0 / smoothing0.1 / aa rand-m9 / seed 42
 #   - 优化器协议:            AdamW(lr 1e-3, wd 0.05, clip 1.0), cosine, warmup 20e
 #   - 硬件 / effective batch: 4 GPU (4,5,6,7) × batch_size 50 = 200
 #   - 总训练预算:            400 epochs (= 200 stage1 + 200 stage2)
-#   - patch_size:            8  (与 stage1 的 28*28=784 tokens 对齐, 而非 DeiT 默认 16)
+#   - patch_size:            8  (token 数 28*28=784 与 stage1 一致)
 #   - amp / workers / num_classes / img_size 一致
 #
-# 模型说明：
-#   - 仍使用 timm 注册的 `deit_small_patch16_224`（DeiT-S/16 命名只是 timm 工厂名），
-#     但通过 --patch_size 8 在创建时覆盖 PatchEmbed/pos_embed，得到的是
-#     embed_dim=384 / depth=12 / num_heads=6 / patch=8 的 DeiT-S/8 等价模型。
-#     in1k_trainer.py 在 'deit' 分支会把 patch_size 透传给 timm。
-#   - 想保留 200e b200 的旧 baseline 结果，可参考 work_dirs/5_5_cifar100_deit_small_200e_b200/。
+# mergenet 方法本身的差异（不属于"协议对齐"，是要对比的设计本身，保持不变）：
+#   - 完整 MergeNet 路径: dtem_t=2, dtem_feat_dim=64, dtem_window_size=8,
+#     use_softkmax, swa_size=256, lambda_local=4.0, total_merge_latent=0
+#   - 注意 lambda_local=4.0 ≠ stage1 branch_a 的 1.0，这正是 mergenet 在做空间压缩
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 export HF_ENDPOINT=https://hf-mirror.com
 
-DATA_DIR=/liziqing/yukai/data
+DATA_DIR=/liziqing/yuhao/yukai/data
 OUTPUT_DIR=./work_dirs/classification
-EXP_NAME=cifar100_deit_small_1000e_b200_p16
+EXP_NAME=cifar100_mergenet_small_400e_dtem8_b200
 
+# OPENTOME_MERGENET_IMPL 不设置则默认 new
 CUDA_VISIBLE_DEVICES=4,5,6,7 torchrun --standalone --nproc_per_node 4 "${SCRIPT_DIR}/in1k_trainer.py" \
   --data_dir ${DATA_DIR} \
   --dataset CIFAR100 \
   --train_split train \
   --val_split val \
-  --model deit_small_patch16_224 \
+  --model hybridtomevit_small_cls \
   --num_classes 100 \
   --img_size 224 \
-  --patch_size 16 \
+  --patch_size 8 \
+  --dtem_t 1 \
+  --dtem_feat_dim 64 \
+  --lambda_local 4.0 \
+  --total_merge_latent 0 \
+  --use_softkmax \
+  --swa_size 256 \
+  --dtem_window_size 8 \
   --batch_size 50 \
-  --epochs 1000 \
+  --epochs 400 \
   --lr 1e-3 \
   --weight_decay 0.05 \
   --sched cosine \

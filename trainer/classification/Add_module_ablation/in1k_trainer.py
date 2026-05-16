@@ -211,12 +211,6 @@ parser.add_argument("--total_merge_latent", type=int, default=4,
                     help="Total number of latent tokens to merge.")
 parser.add_argument("--use_softkmax", action='store_true', default=False,
                     help="Use softkmax variant in DTEM.")
-parser.add_argument("--metric_grad_scale", type=float, default=0.1,
-                    help="Gradient scale for metric layer input (0.1=default 10%% passthrough, 1.0=full gradient)")
-parser.add_argument("--soft_topk", action='store_true', default=False,
-                    help="Use differentiable soft top-k selection with auxiliary weighted pooling loss")
-parser.add_argument("--soft_topk_aux_weight", type=float, default=0.3,
-                    help="Weight for auxiliary pooling logits when --soft_topk is enabled")
 parser.add_argument("--local_block_window", type=int, default=16,
                     help="Window size for additional local blocks.")
 parser.add_argument("--num_local_blocks", type=int, default=0,
@@ -229,57 +223,6 @@ parser.add_argument("--load_only_local", action='store_true', default=False,
                     help='Only load Local Encoder pretrained weights (equivalent to not using --load_full_pretrained).')
 parser.add_argument("--freeze_local_encoder", action='store_true', default=False,
                     help='Freeze Local Encoder parameters for SFT (Supervised Fine-Tuning) latent encoder only.')
-
-# Dual-branch (hybridtomevit_small_cls_dual_ab): T1 joint / T2 alternate / T3 staged
-parser.add_argument('--dual_branch_train_mode', type=str, default='joint',
-                    choices=['joint', 'alternate', 'staged'],
-                    help='T1 joint: L_A + λ L_B [+ optional L_fused]; T2: odd/even steps A or B; T3: phase1 A only then joint')
-parser.add_argument('--dual_branch_loss_weight', type=float, default=1.0,
-                    help='λ multiplier for branch-B CE in joint / staged phase 2')
-parser.add_argument('--dual_fused_loss_weight', type=float, default=0.0,
-                    help='optional CE weight on fused logits (0 disables)')
-parser.add_argument('--dual_stage_b_start_epoch', type=int, default=100,
-                    help='T3: for epoch < this, train branch A only (staged)')
-parser.add_argument('--branch_a_checkpoint', type=str, default='',
-                    help='path to hybridtomevit_small_cls_branch_a checkpoint to load into branch_a')
-parser.add_argument('--align_branch_b_head_on_load', type=int, default=1,
-                    help='when loading --branch_a_checkpoint, also copy the stage1 head weights into '
-                         'branch_b.head (1=yes, default). This is the FIX for the warm-start residual '
-                         'rejection reaction: with random branch_b.head the L_b loss starts at ~ln(C) ⇒ '
-                         'noisy gradient through head_b corrupts head_b/fusion_head and (post-unfreeze) '
-                         'the shared encoder. Copying head from a→b makes L_b start at the same scale '
-                         'as L_a. Set 0 to reproduce the legacy random head_b behavior.')
-parser.add_argument('--fusion_init_on_load', type=str, default='prefer_a',
-                    choices=['prefer_a', 'balanced', 'keep'],
-                    help='when loading --branch_a_checkpoint, how to (re)initialize fusion_head: '
-                         '"prefer_a" (default, warm-start) ⇒ epoch 0 fused = logits_a (zero drop from '
-                         'stage1 eval_top1); "balanced" ⇒ 0.5/0.5 (matches __init__, used for from-scratch '
-                         'symmetric training only — will collapse warm-start eval); "keep" ⇒ leave '
-                         'fusion_head as-is (useful for resume from a dual_ab ckpt).')
-parser.add_argument('--fusion_type', type=str, default='cat_linear',
-                    choices=['cat_linear', 'scalar_blend'],
-                    help='dual_ab fusion: concat+Linear(2C→C) or scalar blend of two logits')
-parser.add_argument('--branch_b_lambda_local', type=float, default=4.0,
-                    help='branch B lambda_local (compression); branch A is fixed to 1.0')
-parser.add_argument('--branch_b_total_merge_latent', type=int, default=0,
-                    help='branch B total_merge_latent')
-parser.add_argument('--branch_b_dtem_window_size', type=int, default=None,
-                    help='branch B DETM window size (None means global / no windowing)')
-parser.add_argument('--branch_b_use_softkmax', action='store_true', default=None,
-                    help='enable softkmax only for branch B')
-parser.add_argument('--branch_b_swa_size', type=int, default=None,
-                    help='branch B SWA size (None disables SWA)')
-parser.add_argument('--freeze_branch_a', action='store_true', default=False,
-                    help='freeze branch A params via requires_grad=False (permanent; no AdamW state for those params).')
-parser.add_argument('--freeze_branch_a_until_epoch', type=int, default=0,
-                    help='if >0, suppress branch_a UPDATES (lr=0 for its param group) from epoch 0 until this epoch, '
-                         'then linearly ramp the group lr_scale back to 1 over --branch_a_lr_ramp_epochs. '
-                         'Forward/backward still run through branch_a so AdamW v_t builds up during the "frozen" phase — '
-                         'this avoids the "first AdamW step after unfreeze" shock (state.step=0 ⇒ update ≈ lr·sign(g) ⇒ '
-                         'NaN params on big shared models). Independent of --freeze_branch_a.')
-parser.add_argument('--branch_a_lr_ramp_epochs', type=int, default=5,
-                    help='after --freeze_branch_a_until_epoch, linearly ramp branch_a group lr_scale from 0 to 1 '
-                         'over this many epochs (set 0 for hard switch). Soft ramp adds an extra safety margin.')
 
 # ToMe parameters
 parser.add_argument("--tome_window_size", type=int, default=None,
@@ -493,127 +436,6 @@ def _parse_args():
     return args, args_text
 
 
-def _split_optimizer_for_branch_a(model, optimizer, args):
-    """Split optimizer.param_groups[0] into branch_a and others.
-
-    Used together with --freeze_branch_a_until_epoch to suppress branch_a UPDATES
-    (lr=0) while still computing gradients through it — this lets AdamW v_t for
-    branch_a's params build up during the "frozen" phase, avoiding the
-    bias-correction shock at unfreeze (state.step=0 ⇒ first update ≈ lr·sign(g)
-    ⇒ NaN params on large shared models).
-
-    Returns True if a new group was added, False otherwise.
-    """
-    if args.freeze_branch_a_until_epoch <= 0 or args.freeze_branch_a:
-        return False
-    inner = model.module if hasattr(model, 'module') else model
-    if not (hasattr(inner, 'branch_a') and hasattr(inner, 'branch_b')):
-        if args.local_rank == 0:
-            _logger.warning('[branch_a_lr_ramp] model has no branch_a/branch_b; skipping split')
-        return False
-    if len(optimizer.param_groups) != 1:
-        if args.local_rank == 0:
-            _logger.warning(
-                '[branch_a_lr_ramp] expected 1 optimizer group, got %d; skipping (incompatible with --lr_local).',
-                len(optimizer.param_groups))
-        return False
-
-    branch_a_ids = set(id(p) for p in inner.branch_a.parameters())
-    g0 = optimizer.param_groups[0]
-    a_params = [p for p in g0['params'] if id(p) in branch_a_ids]
-    other_params = [p for p in g0['params'] if id(p) not in branch_a_ids]
-    if not a_params:
-        if args.local_rank == 0:
-            _logger.warning('[branch_a_lr_ramp] no branch_a params found in optimizer; skipping')
-        return False
-
-    g0['params'] = other_params
-    g0.setdefault('initial_lr', g0.get('lr', args.lr))
-    g0.setdefault('lr_scale', 1.0)
-
-    new_group = {k: v for k, v in g0.items() if k != 'params'}
-    new_group['params'] = a_params
-    new_group['initial_lr'] = g0['initial_lr']
-    new_group['lr'] = 0.0
-    new_group['lr_scale'] = 0.0
-    new_group['_branch_a_lr_ramp'] = True
-    optimizer.add_param_group(new_group)
-
-    if args.local_rank == 0:
-        _logger.info(
-            '[branch_a_lr_ramp] split optimizer: branch_a=%d params (lr_scale=0 until epoch %d, ramp %d epochs); '
-            'other=%d params (normal schedule). Adam state for branch_a will accumulate during freeze phase.',
-            len(a_params), args.freeze_branch_a_until_epoch, args.branch_a_lr_ramp_epochs, len(other_params))
-    return True
-
-
-def _maybe_update_branch_a_lr_scale(optimizer, epoch, freeze_until, ramp_epochs, logger=None, local_rank=0):
-    """Set the branch_a group's lr_scale & lr based on epoch / ramp schedule.
-
-    Must be called at the TOP of each epoch loop iteration. timm schedulers
-    respect ``lr_scale`` on param_groups (see ``Scheduler._update_groups``),
-    so future ``step_update`` calls inside ``train_one_epoch`` will multiply
-    the cosine target by our ``lr_scale`` automatically.
-    """
-    if freeze_until <= 0:
-        return
-    other_lr = None
-    branch_a_group = None
-    for g in optimizer.param_groups:
-        if g.get('_branch_a_lr_ramp'):
-            branch_a_group = g
-        elif other_lr is None:
-            other_lr = g['lr']
-    if branch_a_group is None:
-        return
-
-    if epoch < freeze_until:
-        new_scale = 0.0
-    elif ramp_epochs > 0 and epoch < freeze_until + ramp_epochs:
-        new_scale = float(epoch - freeze_until + 1) / float(ramp_epochs)
-    else:
-        new_scale = 1.0
-
-    prev_scale = branch_a_group.get('lr_scale')
-    if prev_scale != new_scale:
-        branch_a_group['lr_scale'] = new_scale
-        # Apply immediately for THIS epoch's first batch (scheduler.step_update will keep
-        # respecting lr_scale on subsequent batches inside the epoch).
-        if other_lr is not None:
-            branch_a_group['lr'] = other_lr * new_scale
-        if logger is not None and local_rank == 0:
-            logger.info(
-                '[branch_a_lr_ramp] epoch=%d lr_scale: %s → %.3f (effective lr=%.2e)',
-                epoch, f'{prev_scale:.3f}' if isinstance(prev_scale, float) else prev_scale,
-                new_scale, branch_a_group.get('lr', 0.0))
-
-
-def _clip_params_for_step(model, optimizer, exclude_head=False):
-    """Return parameters that should participate in gradient clipping.
-
-    Why: when a freeze schedule sets some optimizer group's ``lr_scale=0`` (so
-    its params won't be updated this epoch), clip_grad='norm' would still
-    aggregate *their* gradients into the GLOBAL L2 norm. For dual-branch
-    merge training that's catastrophic — the frozen branch_a's shared
-    encoder produces large, incoherent gradients (from L_b flowing through
-    via the tied refs), which inflates total_norm by 30-100×, shrinking the
-    clip factor to ~0.01-0.03. That silently scales DOWN the actively-trained
-    head_b / fusion_head gradients, dropping their effective LR below the
-    AdamW WD rate ⇒ those heads decay toward 0 ⇒ fused logits degrade ⇒
-    eval_top1 craters even though branch_a itself never moved.
-
-    Fix: only clip params that will actually be updated this step.
-    """
-    frozen_ids = set()
-    for g in optimizer.param_groups:
-        if g.get('lr_scale', 1.0) == 0.0:
-            for p in g['params']:
-                frozen_ids.add(id(p))
-    if not frozen_ids:
-        return model_parameters(model, exclude_head=exclude_head)
-    return [p for p in model_parameters(model, exclude_head=exclude_head) if id(p) not in frozen_ids]
-
-
 def main():
     setup_default_logging()
     if hasattr(torch.serialization, 'add_safe_globals'):
@@ -688,9 +510,6 @@ def main():
             'lambda_local': args.lambda_local,
             'total_merge_latent': args.total_merge_latent,
             'use_softkmax': args.use_softkmax,
-            'metric_grad_scale': args.metric_grad_scale,
-            'soft_topk': args.soft_topk,
-            'soft_topk_aux_weight': args.soft_topk_aux_weight,
             'local_block_window': args.local_block_window,
             'tome_window_size': args.tome_window_size,
             'tome_use_naive_local': args.tome_use_naive_local,
@@ -701,14 +520,6 @@ def main():
         })
         if USE_OLD_MERGENET:
             model_kwargs['num_local_blocks'] = args.num_local_blocks
-        if 'dual_ab' in args.model.lower():
-            model_kwargs['fusion_type'] = args.fusion_type
-            model_kwargs['branch_b_lambda_local'] = args.branch_b_lambda_local
-            model_kwargs['branch_b_total_merge_latent'] = args.branch_b_total_merge_latent
-            model_kwargs['branch_b_dtem_window_size'] = args.branch_b_dtem_window_size
-            model_kwargs['branch_b_use_softkmax'] = args.branch_b_use_softkmax
-            model_kwargs['branch_b_swa_size'] = args.branch_b_swa_size
-            model_kwargs['freeze_branch_a'] = args.freeze_branch_a
     # DeiT models
     elif 'deit' in args.model.lower():
         model_kwargs.update({
@@ -745,22 +556,6 @@ def main():
     if args.channels_last:
         model = model.to(memory_format=torch.channels_last)
 
-    if args.branch_a_checkpoint and os.path.isfile(args.branch_a_checkpoint):
-        _m = model
-        if hasattr(_m, 'load_branch_a_from_single_model_checkpoint'):
-            miss, unexp = _m.load_branch_a_from_single_model_checkpoint(
-                args.branch_a_checkpoint, map_location='cpu',
-                align_branch_b_head=bool(args.align_branch_b_head_on_load),
-                fusion_init=args.fusion_init_on_load)
-            if args.local_rank == 0:
-                _logger.info(
-                    'Loaded branch_a from %s (missing keys: %d, unexpected: %d). '
-                    'warm-start fixes: align_branch_b_head=%s, fusion_init=%s',
-                    args.branch_a_checkpoint, len(miss), len(unexp),
-                    bool(args.align_branch_b_head_on_load), args.fusion_init_on_load)
-        elif args.local_rank == 0:
-            _logger.warning('branch_a_checkpoint set but model has no load_branch_a_from_single_model_checkpoint')
-
     # setup synchronized BatchNorm for distributed training
     # model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     if args.distributed and args.sync_bn:
@@ -785,7 +580,7 @@ def main():
     lr_local = args.lr_local if args.lr_local is not None else args.lr
     use_different_lr = (
         (lr_local != args.lr) and 
-        ('hybridtome' in args.model.lower() or 'tome' in args.model.lower() or 'ablation' in args.model.lower() or 'dual_ab' in args.model.lower())
+        ('hybridtome' in args.model.lower() or 'tome' in args.model.lower() or 'ablation' in args.model.lower())
     )
     
     if use_different_lr:
@@ -861,11 +656,6 @@ def main():
         # The scheduler will automatically maintain the ratio between param groups
         if args.local_rank == 0:
             _logger.info(f'Using scheduler with multiple parameter groups (lr={args.lr:.2e}, lr_local={lr_local:.2e})')
-
-    # Optionally split optimizer so branch_a can have lr_scale=0 during the "frozen" phase
-    # (forward/backward still go through it ⇒ AdamW v_t accumulates ⇒ no first-step shock).
-    _split_optimizer_for_branch_a(model, optimizer, args)
-
     lr_scheduler, num_epochs = create_scheduler(args, optimizer)
     start_epoch = 0
     if args.start_epoch is not None:
@@ -948,12 +738,6 @@ def main():
         entropy_thr = 0
         print(model)
         for epoch in range(start_epoch, num_epochs):
-            _maybe_update_branch_a_lr_scale(
-                optimizer, epoch,
-                freeze_until=(args.freeze_branch_a_until_epoch if not args.freeze_branch_a else 0),
-                ramp_epochs=args.branch_a_lr_ramp_epochs,
-                logger=_logger, local_rank=args.local_rank)
-
             if args.distributed and hasattr(loader_train.sampler, 'set_epoch'):
                 loader_train.sampler.set_epoch(epoch)
 
@@ -971,16 +755,13 @@ def main():
                     _logger.info("Distributing BatchNorm running means and vars")
                 distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
 
-            eval_metrics = validate(
-                model, loader_eval, validate_loss_fn, args,
-                amp_autocast=amp_autocast, current_epoch=epoch)
+            eval_metrics = validate(model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast)
 
             if model_ema is not None and not args.model_ema_force_cpu:
                 if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
                     distribute_bn(model_ema, args.world_size, args.dist_bn == 'reduce')
                 ema_eval_metrics = validate(
-                    model_ema.module, loader_eval, validate_loss_fn, args,
-                    amp_autocast=amp_autocast, log_suffix=' (EMA)', current_epoch=epoch)
+                    model_ema.module, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast, log_suffix=' (EMA)')
                 eval_metrics = ema_eval_metrics
 
             if lr_scheduler is not None:
@@ -1001,60 +782,6 @@ def main():
         pass
     if best_metric is not None:
         _logger.info('*** Best metric: {0} (epoch {1})'.format(best_metric, best_epoch))
-
-
-def _dual_ab_active_branch(args, epoch: int, batch_idx: int, loader_len: int):
-    """Training-time active_branch for CLSDualBranchHybridToMeModel."""
-    if 'dual_ab' not in args.model.lower():
-        return None
-    step = epoch * loader_len + batch_idx
-    mode = args.dual_branch_train_mode
-    if mode == 'alternate':
-        return 'a' if (step % 2 == 0) else 'b'
-    if mode == 'staged' and epoch < args.dual_stage_b_start_epoch:
-        return 'a'
-    return 'both'
-
-
-def _dual_ab_eval_active_branch(args, epoch: int):
-    """Eval-time active_branch for CLSDualBranchHybridToMeModel.
-
-    See 20260505_视觉MergeNet_P0P1P2进度与计划报告.md §4.2.2:
-      - T1 joint / T2 alternate: 评估始终走 ``both``（fusion_head 是最终输出）。
-      - T3 staged: 阶段 1（``epoch < dual_stage_b_start_epoch``）分支 B 从未训练，
-        若仍走 ``both`` 则验证由随机 fusion_head + 随机分支 B 主导，会全程 ~1%；
-        改成 ``a`` 才能真实反映分支 A 是否在收敛，``model_best.pth.tar`` 才有意义。
-    """
-    if 'dual_ab' not in getattr(args, 'model', '').lower():
-        return None
-    mode = getattr(args, 'dual_branch_train_mode', None)
-    stage_b_start = getattr(args, 'dual_stage_b_start_epoch', 0)
-    if mode == 'staged' and epoch < stage_b_start:
-        return 'a'
-    return 'both'
-
-
-def _forward_maybe_dual(model, input, args, epoch: int, batch_idx: int, loader_len: int):
-    active = _dual_ab_active_branch(args, epoch, batch_idx, loader_len)
-    if active is None:
-        return model(input)
-    return model(input, active_branch=active)
-
-
-def _dual_ab_loss(output_tuple, target, loss_fn, args):
-    """Returns (loss, logits_for_acc)."""
-    logits_main, aux = output_tuple[0], output_tuple[1]
-    la, lb = aux.get('logits_a'), aux.get('logits_b')
-    lf = aux.get('logits_fused', logits_main)
-    active = aux.get('active_branch', 'both')
-
-    if active != 'both':
-        return loss_fn(logits_main, target), logits_main
-
-    loss = loss_fn(la, target) + args.dual_branch_loss_weight * loss_fn(lb, target)
-    if args.dual_fused_loss_weight > 0:
-        loss = loss + args.dual_fused_loss_weight * loss_fn(lf, target)
-    return loss, lf
 
 
 def train_one_epoch(epoch: int,
@@ -1113,18 +840,13 @@ def train_one_epoch(epoch: int,
             input = input.contiguous(memory_format=torch.channels_last)
 
         with amp_autocast():
-            output = _forward_maybe_dual(model, input, args, epoch, batch_idx, len(loader))
-
-            dual_handled = False
-            if isinstance(output, (tuple, list)) and len(output) >= 2:
-                aux = output[1]
-                if isinstance(aux, dict) and aux.get('dual_branch'):
-                    loss, output = _dual_ab_loss(output, target, loss_fn, args)
-                    dual_handled = True
-            if not dual_handled:
-                if isinstance(output, (tuple, list)):
-                    output = output[0]
-                loss = loss_fn(output, target)
+            output = model(input)
+            
+            # Handle models that return tuple (custom models) vs single output (standard models)
+            if isinstance(output, (tuple, list)):
+                output = output[0]
+            
+            loss = loss_fn(output, target)
             if torch.any(torch.isnan(loss)) or torch.any(torch.isinf(loss)):
                 raise ValueError("Inf or nan loss value: use fp32 training instead!")
 
@@ -1145,13 +867,13 @@ def train_one_epoch(epoch: int,
             loss_scaler(
                 loss, optimizer,
                 clip_grad=args.clip_grad, clip_mode=args.clip_mode,
-                parameters=_clip_params_for_step(model, optimizer, exclude_head='agc' in args.clip_mode),
+                parameters=model_parameters(model, exclude_head='agc' in args.clip_mode),
                 create_graph=second_order)
         else:
             loss.backward(create_graph=second_order)
             if args.clip_grad is not None:
                 dispatch_clip_grad(
-                    _clip_params_for_step(model, optimizer, exclude_head='agc' in args.clip_mode),
+                    model_parameters(model, exclude_head='agc' in args.clip_mode),
                     value=args.clip_grad, mode=args.clip_mode)
             optimizer.step()
 
@@ -1283,22 +1005,13 @@ def concat_all_gather(tensor):
     return output
 
 
-def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='', current_epoch=0):
+def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix=''):
     batch_time_m = AverageMeter()
     losses_m = AverageMeter()
     top1_m = AverageMeter()
     top5_m = AverageMeter()
 
     model.eval()
-
-    eval_active = _dual_ab_eval_active_branch(args, current_epoch)
-    if eval_active is not None and args.local_rank == 0:
-        _logger.info(
-            f'[validate] dual_ab eval at epoch {current_epoch}: '
-            f'active_branch={eval_active} '
-            f'(mode={getattr(args, "dual_branch_train_mode", None)}, '
-            f'stage_b_start={getattr(args, "dual_stage_b_start_epoch", None)})'
-        )
 
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -1317,10 +1030,7 @@ def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='',
                 input = input.contiguous(memory_format=torch.channels_last)
 
             with amp_autocast():
-                if eval_active is not None:
-                    output = model(input, active_branch=eval_active)
-                else:
-                    output = model(input)
+                output = model(input)
 
             if isinstance(output, (tuple, list)):
                 output = output[0]

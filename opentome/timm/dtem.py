@@ -153,7 +153,9 @@ class DTEMLinear(nn.Linear):
             self.metric_layer = self.metric_layer.to(input.device)
         
         out1 = self.qkv_layer(input)  # Shape: (B, N, 3 * num_heads * head_dim)
-        out2 = self.metric_layer(input.detach())  # Shape: (B, N, feat_dim)
+        # Allow 10% gradient to flow through metric for end-to-end optimization
+        metric_input = input * 0.1 + input.detach() * 0.9
+        out2 = self.metric_layer(metric_input)  # Shape: (B, N, feat_dim)
         return out1, out2
 
 # pip install https://github.com/Dao-AILab/flash-attention/releases/download/v2.7.4.post1/flash_attn-2.7.4.post1+cu12torch2.6cxx11abiFALSE-cp310-cp310-linux_x86_64.whl
@@ -185,61 +187,47 @@ class DTEMAttention(Attention):
         q, k = self.q_norm(q), self.k_norm(k)
         # import pdb;pdb.set_trace()
 
-        # fp32 for softmax computation
-        q, k, v = q.type(torch.float32), k.type(torch.float32), v.type(torch.float32)
-        with torch.cuda.amp.autocast(dtype=torch.float32, enabled=True):
-            q = q * self.scale
-            window_size = self._tome_info.get("swa_size")
-            if window_size is None:
-                window_size = self._tome_info.get("window_size")
-            if window_size is not None and window_size > 0:
-                # 仅支持 flash-attn，本地窗口失败时直接报错
-                if not FLASH_ATTN_AVAILABLE:
-                    raise RuntimeError(
-                        "DTEM local attention requires flash-attn. "
-                        "Please install flash-attn or set dtem_window_size=None."
-                    )
-                if size is None:
-                    raise RuntimeError(
-                        "DTEM local attention requires size for bias. "
-                        "Got size=None while local window is enabled."
-                    )
-                try:
-                    # 处理 bias：size 可能是 (B, N) 或 (B, N, 1)
-                    size_log = size.squeeze(-1) if size.ndim == 3 else size
-                    size_log = size_log.clamp_min(1e-6).log()
-                    
-                    # 调用 flash attention (自动处理格式)
-                    # q,k,v: (B, H, N, D)，biased_local_attention 会自动检测并处理
-                    x_out = biased_local_attention(
-                        q, k, v, 
-                        bias=size_log,
-                        local_window=window_size,
-                        dropout_p=self.attn_drop.p,
-                        training=self.training,
-                        x_dtype=x.dtype
-                    )  # 返回格式与输入一致: (B, H, N, D)
-                    
-                    # 转换为 (B, N, C): (B, H, N, D) -> (B, N, H, D) -> (B, N, H*D)
-                    x_bnc = x_out.transpose(1, 2).reshape(B, N, self.num_heads * self.head_dim)
-                except Exception as e_flash:
-                    raise RuntimeError(
-                        "DTEM local attention failed in flash-attn path. "
-                        "Please verify flash-attn installation and inputs."
-                    ) from e_flash
+        q = q * self.scale
+        window_size = self._tome_info.get("swa_size")
+        if window_size is None:
+            window_size = self._tome_info.get("window_size")
+        if window_size is not None and window_size > 0:
+            if not FLASH_ATTN_AVAILABLE:
+                raise RuntimeError(
+                    "DTEM local attention requires flash-attn. "
+                    "Please install flash-attn or set dtem_window_size=None."
+                )
+            if size is None:
+                raise RuntimeError(
+                    "DTEM local attention requires size for bias. "
+                    "Got size=None while local window is enabled."
+                )
+            size_log = size.squeeze(-1) if size.ndim == 3 else size
+            size_log = size_log.float().clamp_min(1e-6).log()
+            
+            x_out = biased_local_attention(
+                q, k, v, 
+                bias=size_log,
+                local_window=window_size,
+                dropout_p=self.attn_drop.p,
+                training=self.training,
+                x_dtype=x.dtype
+            )
+            x_bnc = x_out.transpose(1, 2).reshape(B, N, self.num_heads * self.head_dim)
+        else:
+            # Compute softmax in fp32 for numerical stability, keep everything else in AMP dtype
+            attn = q @ k.transpose(-2, -1)
+            if size is None or (not self._tome_info["r"]):
+                attn = attn.float().softmax(dim=-1).to(v.dtype)
             else:
-                # 全局注意力路径
-                attn = q @ k.transpose(-2, -1)
-                if size is None or (not self._tome_info["r"]): # for MAE
-                    attn = attn.softmax(dim=-1)
-                else:   # as in DynamicViT
-                    _attn = attn - torch.max(attn, dim=-1, keepdim=True)[0]
-                    size_ = size if size is not None else torch.ones(B, N, 1, device=x.device, dtype=torch.float32)
-                    _attn = _attn.exp_() * size_[:, None, None, :, 0].type(torch.float32)
-                    attn = _attn / _attn.sum(dim=-1, keepdim=True)
-                attn = self.attn_drop(attn)
-                # (B, H, N, D) -> (B, N, C)
-                x_bnc = (attn @ v).permute(0, 2, 1, 3).contiguous().view(B, N, self.num_heads * self.head_dim)
+                attn_f = attn.float()
+                _attn = attn_f - torch.max(attn_f, dim=-1, keepdim=True)[0]
+                size_ = size if size is not None else torch.ones(B, N, 1, device=x.device, dtype=torch.float32)
+                _attn = _attn.exp_() * size_[:, None, None, :, 0].float()
+                attn_f = _attn / _attn.sum(dim=-1, keepdim=True)
+                attn = attn_f.to(v.dtype)
+            attn = self.attn_drop(attn)
+            x_bnc = (attn @ v).permute(0, 2, 1, 3).contiguous().view(B, N, self.num_heads * self.head_dim)
 
         x = x_bnc
         x = self.proj(x)
@@ -758,10 +746,14 @@ class DTEMBlock(Block):
             size_output = torch.cat([w, size[:, n:, 0]], dim=-1).unsqueeze(-1)
         return x_output, size_output, n , _out, source_matrix
 
-    def _merge_eval(self, x, size, r, metric, source_matrix=None):    # eval：保留 ToMe 行为。弃用。
+    def _merge_eval(self, x, size, r, n, metric, source_matrix=None):
         metric = metric['metric']
         norm = metric.norm(dim=-1, keepdim=True).clamp_min(1e-6)
         metric = metric / norm
+
+        r = min(r, (n - 1) // 2)
+        if r <= 0:
+            return x, size, n, None, source_matrix
 
         merge, _, current_level_map = bipartite_soft_matching(metric,
                                            r,
@@ -784,8 +776,9 @@ class DTEMBlock(Block):
         return x, self._tome_info["size"], x.size(1), None, source_matrix
 
     def merge(self, x, size, r, n, metric, source_matrix=None):
-        # import pdb;pdb.set_trace()
-        return self._merge_train(x, size, r, n, metric, source_matrix)
+        if self.training:
+            return self._merge_train(x, size, r, n, metric, source_matrix)
+        return self._merge_eval(x, size, r, n, metric, source_matrix)
 
     def forward(self, x, size, n=None, source_matrix=None):
         if size is None:

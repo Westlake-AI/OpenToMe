@@ -674,9 +674,8 @@ class LocalAttention(nn.Module):
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
         q, k, v = qkv.unbind(0)  # (B, H, N, D)
         q, k = self.q_norm(q), self.k_norm(k)
-        
         # 使用 unbiased local attention
-        q = q * self.scale
+        # q = q * self.scale
         x = unbiased_local_attention(
             q, k, v,
             local_window=self.local_window,
@@ -689,6 +688,67 @@ class LocalAttention(nn.Module):
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
+
+
+class ToMeLocalAttention(nn.Module):
+    """
+    与 LocalAttention 相同的 unbiased local attention，但返回 ToMeAttention 兼容的 (out, metric)。
+    metric 为各 head 上 key 的均值，供块内 ToMe 二分匹配使用。
+    全局 ToMe 的 proportional attention（size）在局部窗口路径中不参与 logits，仅保留接口兼容。
+    """
+
+    fused_attn: Final[bool]
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = False,
+        qk_norm: bool = False,
+        attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
+        norm_layer: Optional[nn.Module] = None,
+        local_window: int = 16,
+    ) -> None:
+        super().__init__()
+        if norm_layer is None:
+            from timm.layers.norm import LayerNorm as DefaultLN
+
+            norm_layer = DefaultLN
+        assert dim % num_heads == 0, "dim should be divisible by num_heads"
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim**-0.5
+        self.fused_attn = False
+        self.local_window = local_window
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x: torch.Tensor, size: Optional[torch.Tensor] = None):
+        del size  # proportional bias 未接入 unbiased local attention；与 ToMeAttention 签名一致
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+        q, k = self.q_norm(q), self.k_norm(k)
+        # q = q * self.scale
+        x_out = unbiased_local_attention(
+            q,
+            k,
+            v,
+            local_window=self.local_window,
+            dropout_p=self.attn_drop.p if self.training else 0.0,
+            training=self.training,
+        )
+        x_out = x_out.transpose(1, 2).reshape(B, N, C)
+        x_out = self.proj(x_out)
+        x_out = self.proj_drop(x_out)
+        metric = dict(metric=k.mean(1))
+        return x_out, metric
 
 
 class LocalBlock(nn.Module):

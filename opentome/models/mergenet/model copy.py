@@ -10,7 +10,6 @@ from timm.models.registry import register_model
 from opentome.timm.dtem import DTEMBlock
 from opentome.tome.tome import token_unmerge_from_map, parse_r
 from opentome.timm.bias_local_attn import LocalBlock
-from opentome.utils.thetopk import ThreTopK
 
 class MyCrossAttention(nn.Module):
     """
@@ -31,11 +30,7 @@ class MyCrossAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
         assert self.head_dim * num_heads == embed_dim, "embed_dim must be divisible by num_heads"
-
-        # Pre-norm for cross-attention stability.
-        self.q_norm = nn.LayerNorm(embed_dim)
-        self.kv_norm = nn.LayerNorm(embed_dim)
-
+        
         # q from seq_q, k/v from seq_kv
         self.q_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
         self.k_proj = nn.Linear(embed_dim, embed_dim, bias=bias)
@@ -53,27 +48,14 @@ class MyCrossAttention(nn.Module):
         Returns:
             context: (Bq, Nq, C)
         """
-        orig_dtype = q.dtype
-        # Pre-norm before projections to suppress activation drift.
-        q = self.q_norm(q)
-        kv = self.kv_norm(kv)
-
         Bq, Nq, C = q.shape
         Bk, Nk, Ck = kv.shape
         assert C == self.embed_dim and Ck == self.embed_dim
 
-        # Local fp32 guard: keep cross-attention numerics stable under AMP.
-        # We intentionally run q/k/v and out_proj in fp32, then cast back.
-        if q.is_cuda:
-            with torch.amp.autocast(device_type='cuda', enabled=False):
-                q_proj = self.q_proj(q.float())   # (Bq, Nq, C)
-                k_proj = self.k_proj(kv.float())  # (Bk, Nk, C)
-                v_proj = self.v_proj(kv.float())  # (Bk, Nk, C)
-        else:
-            print("error")
-            q_proj = self.q_proj(q.float())   # (Bq, Nq, C)
-            k_proj = self.k_proj(kv.float())  # (Bk, Nk, C)
-            v_proj = self.v_proj(kv.float())  # (Bk, Nk, C)
+        # Compute projections
+        q_proj = self.q_proj(q)  # (Bq, Nq, C)
+        k_proj = self.k_proj(kv) # (Bk, Nk, C)
+        v_proj = self.v_proj(kv) # (Bk, Nk, C)
 
         # Reshape for multi-head: (B, N, C) -> (B, num_heads, N, head_dim)
         q_proj = q_proj.reshape(Bq, Nq, self.num_heads, self.head_dim).transpose(1, 2)
@@ -105,11 +87,9 @@ class MyCrossAttention(nn.Module):
         # Apply attention bias/mask if provided
         if mask is not None:
             # mask: (B, Nq, Nk) -> (B, 1, Nq, Nk)
-            attn_scores = attn_scores + mask.unsqueeze(1).float()
-
-        # FP32-safe softmax: AMP fp16 下，attention logits 范围常超过 fp16 可表示范围，
-        # 且 mask=-1e4 的 row 在 fp16 softmax 中会出现 0/0 → NaN。timm/HF 标配把
-        # softmax 提到 fp32 做，再 cast 回原 dtype，对显存与吞吐影响微乎其微。
+            attn_scores = attn_scores + mask.unsqueeze(1)
+        
+        # Softmax and dropout
         attn_probs = torch.softmax(attn_scores, dim=-1)
         attn_probs = torch.nn.functional.dropout(attn_probs, p=self.attn_drop, training=self.training)
         
@@ -122,13 +102,9 @@ class MyCrossAttention(nn.Module):
         context = context.transpose(1, 2).reshape(B, Nq, self.embed_dim)
 
         # Output projection
-        if context.is_cuda:
-            with torch.amp.autocast(device_type='cuda', enabled=False):
-                context = self.out_proj(context.float())
-        else:
-            context = self.out_proj(context.float())
+        context = self.out_proj(context)
         context = self.proj_drop(context)
-        return context.to(orig_dtype)
+        return context
 
 class DTEMMergeOnly(DTEMBlock):
     """
@@ -144,7 +120,7 @@ class LocalEncoder(nn.Module):
                  local_depth: int = 4, drop_rate=0.0, attn_drop_rate=0.0, drop_path_rate=0.0,
                  dtem_feat_dim=None, dtem_window_size: int = None, dtem_t: int = 1,
                  total_merge_local: int = 0, use_softkmax: bool = False, swa_size: int = None,
-                 local_block_window: int = 16, metric_grad_scale: float = 0.1):
+                 local_block_window: int = 16):
         super().__init__()
 
         if local_depth <= 0:
@@ -153,64 +129,44 @@ class LocalEncoder(nn.Module):
         self.local_depth = local_depth
         self.embed_dim = embed_dim
         self.num_heads = num_heads
-        self.metric_grad_scale = metric_grad_scale
 
-        # 基础 ViT 结构只用于 patch_embed / cls_token / pos_embed / norm_pre / patch_drop。
-        # 注意：trailing self.vit.norm 在下方被替换为 nn.Identity()——见后续注释。
+        # 基础 ViT 结构只用于 patch/pos embed 与 norm
         self.vit = VisionTransformer(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim,
                                      depth=0, num_heads=num_heads, mlp_ratio=mlp_ratio,
                                      qkv_bias=True, num_classes=0,
                                      drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate)
 
-        # 修订（2026-05-06）：把 LocalEncoder 末端的 trailing LN 摘掉。
-        # 背景：CLSHybridToMeModel 把 LocalEncoder 4 层 + LatentEncoder 8 层串成一个 12 层
-        #     pre-norm ViT 残差流。timm 的 VisionTransformer 在 blocks 之后默认会跑一次
-        #     ``self.vit.norm``（trailing LN）；如果保留它，等价于"在 12 层 ViT 残差流的第 4↔5
-        #     层中段强行插了一个 LayerNorm"，把前 4 层累积的残差幅度信息抹掉，仅保留方向。
-        #     与 DeiT-S 12 层全局 ViT 的对照实验（c100_branch_a_deit_aligned vs
-        #     c100_deit_200e）下，这条多余的 LN 是 ~1pp 级的劣化来源之一。
-        # 修复：把 self.vit.norm 替换成 nn.Identity()。这样 LocalEncoder.forward 末端的
-        #     ``x_out = self.vit.norm(x_merge)`` 退化为恒等映射，``x_out = x_merge`` 即原始
-        #     blocks 输出（或 r>0 时的 DTEM merge 后 raw 特征），LatentEncoder block 5 接收
-        #     的就是 raw 残差，与 DeiT block 5 看到的输入语义一致。最终 head 之前的
-        #     ``latent.vit.norm`` 仍然保留（与 DeiT 末端 LN 对齐）。
-        # 兼容性：
-        #   - ``_tie_shared_embeddings`` 中 ``vit_a.norm = vit_b.norm`` 现在变成 Identity↔
-        #     Identity 的 tie，行为合法。
-        #   - 旧 ckpt（含 ``local.vit.norm.weight/bias``）通过 strict=False 加载时这两个 key
-        #     会落到 unexpected_keys，干净忽略；不影响 blocks/metric_layers/latent 等主体
-        #     权重的加载。
-        #   - timm 预训练 DeiT 的 ``norm.weight/bias`` 是为"after block 12"训练的 LN，本来
-        #     被错误地灌进了"after block 4"的位置（``load_pt_weights`` 不区分这一点），改成
-        #     Identity 后这条潜在不一致也一并清掉。
-        self.vit.norm = nn.Identity()
-
-        # 修订（2026-05-05，应用户要求）：统一使用 LocalBlock（windowed local attention），
-        # 关闭原来的 ``total_merge_local==0 -> TimmBlock`` 全局分支。
-        # 目的：让分支 A（lambda_local=1, total_merge_local=0）和分支 B（lambda_local>1）的
-        # local.vit.blocks 在结构与参数 shape 上完全一致，从而可以在
-        # CLSDualBranchHybridToMeModel._tie_shared_embeddings 中直接 tie。
-        # 副作用：分支 A 不再等价于 12 层全局 ViT/DeiT；它的语义改为
-        #         "4 层 windowed local attention + r=0 不合并 token + 8 层 latent self-attn"。
-        # 兼容性保留：字段 self.use_global_attn 仍然存在，但硬编码为 False，避免外部代码读到
-        #             None 报错。如果未来需要恢复"全局 attn 单分支"路径，把下一行改回
-        #             ``total_merge_local == 0`` 即可，配合不要 tie blocks。
-        self.use_global_attn = False
+        # 方案 A: total_merge_local==0 (lambda=1) 时使用标准全局 Block，与 DeiT 预训练权重兼容
+        self.use_global_attn = total_merge_local == 0
 
         dpr = torch.linspace(0, drop_path_rate, local_depth).tolist()
-        self.vit.blocks = nn.ModuleList([
-            LocalBlock(
-                dim=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=True,
-                attn_drop=attn_drop_rate,
-                proj_drop=drop_rate,
-                drop_path=dpr[i],
-                local_window=local_block_window,
-            )
-            for i in range(local_depth)
-        ])
+        if self.use_global_attn:
+            self.vit.blocks = nn.ModuleList([
+                TimmBlock(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=True,
+                    attn_drop=attn_drop_rate,
+                    proj_drop=drop_rate,
+                    drop_path=dpr[i],
+                )
+                for i in range(local_depth)
+            ])
+        else:
+            self.vit.blocks = nn.ModuleList([
+                LocalBlock(
+                    dim=embed_dim,
+                    num_heads=num_heads,
+                    mlp_ratio=mlp_ratio,
+                    qkv_bias=True,
+                    attn_drop=attn_drop_rate,
+                    proj_drop=drop_rate,
+                    drop_path=dpr[i],
+                    local_window=local_block_window,
+                )
+                for i in range(local_depth)
+            ])
 
         # DTEM metric head（每层一个）
         self.metric_dim = self._resolve_metric_dim(embed_dim, num_heads, dtem_feat_dim)
@@ -304,7 +260,6 @@ class LocalEncoder(nn.Module):
         )
         self._tome_info["r"] = r_list
         self._tome_info["size"] = torch.ones_like(x[..., 0:1])
-        self._tome_info["source_matrix"] = None
         self._tome_info["token_counts_local"] = []
 
         size = self._tome_info["size"]
@@ -312,9 +267,7 @@ class LocalEncoder(nn.Module):
 
         for i, layer_x in enumerate(x_layers):
             x_metric = self._aggregate_with_source_matrix(layer_x, size, source_matrix)
-            s = self.metric_grad_scale
-            metric_input = x_metric * s + x_metric.detach() * (1 - s)
-            metric = self.metric_layers[i](metric_input)
+            metric = self.metric_layers[i](x_metric.detach())
             r = r_list[i] if i < len(r_list) else 0
 
             x_merge, size, n, _, source_matrix = self.merge_block._merge_train(
@@ -332,10 +285,8 @@ class LocalEncoder(nn.Module):
 class LatentEncoder(nn.Module):
     def __init__(self, img_size=224, patch_size=16, embed_dim=768, num_heads=12, mlp_ratio=4.0,
                  depth=12, drop_rate=0.0, attn_drop_rate=0.0, drop_path_rate=0.0,
-                 source_tracking_mode='map', prop_attn=True, window_size=None, use_naive_local=False, r: int = 2,
-                 use_tome: bool = True):
+                 source_tracking_mode='map', prop_attn=True, window_size=None, use_naive_local=False, r: int = 2):
         super().__init__()
-        self.use_tome = use_tome
         self.vit = VisionTransformer(img_size=img_size, patch_size=patch_size, embed_dim=embed_dim,
                                      depth=depth, num_heads=num_heads, mlp_ratio=mlp_ratio,
                                      qkv_bias=True, num_classes=0, class_token=False, global_pool='',
@@ -351,18 +302,6 @@ class LatentEncoder(nn.Module):
         self.vit.num_prefix_tokens = 0
 
     def forward(self, x, size):
-        if not self.use_tome:
-            token_counts_latent = []
-            for blk in self.vit.blocks:
-                x = blk(x)
-                token_counts_latent.append(x.shape[1])
-            x = self.vit.norm(x)
-            info = {
-                "source_map": None,
-                "token_counts_latent": token_counts_latent,
-                "size": size,
-            }
-            return x, size, info
         # 重置跨 batch 的踪迹与屏蔽，避免状态泄漏
         # self.vit._tome_info["token_mask_for_dtem"] = None
         self.vit._tome_info["r"] = parse_r(len(self.vit.blocks), self.vit._tome_info["r"], self.vit._tome_info.get("total_merge", None))
@@ -434,9 +373,6 @@ class HybridToMeModel(nn.Module):
                  load_full_pretrained: bool = True,
                  freeze_local_encoder: bool = False,
                  swa_size: int = None,
-                 metric_grad_scale: float = 0.1,
-                 soft_topk: bool = False,
-                 soft_topk_aux_weight: float = 0.3,
                  **kwargs):
         super().__init__()
 
@@ -474,9 +410,6 @@ class HybridToMeModel(nn.Module):
         self.tome_use_naive_local = bool(tome_use_naive_local)
         self.use_softkmax = use_softkmax
         self.local_block_window = local_block_window
-        self.soft_topk = soft_topk
-        self.soft_topk_aux_weight = soft_topk_aux_weight
-        self.metric_grad_scale = metric_grad_scale
 
         # ------ Linear ------ #
         self.num_classes = num_classes
@@ -498,7 +431,6 @@ class HybridToMeModel(nn.Module):
             use_softkmax=self.use_softkmax,
             swa_size=swa_size,
             local_block_window=self.local_block_window,
-            metric_grad_scale=self.metric_grad_scale,
         )
         self.latent = LatentEncoder(self.img_size, self.patch_size, self.embed_dim, self.num_heads, self.mlp_ratio,
                                     depth = self.latent_depth, drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate,
@@ -517,12 +449,6 @@ class HybridToMeModel(nn.Module):
 
         trunc_normal_(self.head.weight, std=.02)
         nn.init.zeros_(self.head.bias)
-
-        # Zero-init cross-attention output projections so residual starts as identity
-        nn.init.zeros_(self.encode_cross_attention.out_proj.weight)
-        nn.init.zeros_(self.encode_cross_attention.out_proj.bias)
-        nn.init.zeros_(self.decode_cross_attention.out_proj.weight)
-        nn.init.zeros_(self.decode_cross_attention.out_proj.bias)
 
         self.swa_size = swa_size
 
@@ -714,15 +640,16 @@ class HybridToMeModel(nn.Module):
         if k <= 0 or k > token_strength_no_cls.shape[1]:
             k = token_strength_no_cls.shape[1]
         
+        # 🔧 FIX: topk 和 argsort 操作不需要梯度，用 detach() 避免保留索引计算的中间结果
         with torch.no_grad():
-            topk_vals, topk_indices = torch.topk(token_strength_no_cls.detach(), k, dim=1, largest=True, sorted=False)
-            topk_com = torch.gather(center_of_mass[:, 1:], 1, topk_indices)
-            sorted_order = torch.argsort(topk_com, dim=1)
-            sorted_topk_indices = torch.gather(topk_indices, 1, sorted_order)
-
-        topk_in_full = sorted_topk_indices + 1
-        topk_x_trace = torch.gather(x_local, 1, topk_in_full.unsqueeze(-1).expand(-1, -1, x_local.shape[-1]))
-        topk_size_trace = torch.gather(size_local, 1, topk_in_full.unsqueeze(-1).expand(-1, -1, size_local.shape[-1]))
+            topk_vals, topk_indices = torch.topk(token_strength_no_cls.detach(), k, dim=1, largest=True, sorted=False)  # (B, k)
+            topk_com = torch.gather(center_of_mass, 1, topk_indices)  # (B, k)
+            sorted_order = torch.argsort(topk_com, dim=1)  # (B, k)
+            sorted_topk_indices = torch.gather(topk_indices, 1, sorted_order)  # (B, k)
+        
+        # 使用索引 gather 实际的 token 和 size（这些需要梯度）
+        topk_x_trace = torch.gather(x_local, 1, sorted_topk_indices.unsqueeze(-1).expand(-1, -1, x_local.shape[-1]))
+        topk_size_trace = torch.gather(size_local, 1, sorted_topk_indices.unsqueeze(-1).expand(-1, -1, size_local.shape[-1]))
         topk_x = torch.cat([x_local[:, :1], topk_x_trace], dim=1)
         topk_size = torch.cat([size_local[:, :1, 0], topk_size_trace.squeeze(-1)], dim=-1).unsqueeze(-1)
 
@@ -732,22 +659,22 @@ class HybridToMeModel(nn.Module):
             with torch.no_grad():
                 center = info_local["source_matrix_center"]
                 width = info_local["source_matrix_width"]
-                bias = torch.full((B, k+1, L_full), -1e4, device=device, dtype=x_local.dtype)
+                bias = torch.full((B, k+1, L_full), -1e10, device=device, dtype=x_local.dtype)
                 bias[:, 0, :] = 0.0
-                actual_indices = topk_in_full
+                actual_indices = sorted_topk_indices + 1  # [B, k]
                 source_for_topk = torch.gather(
                     source_matrix, 1,
                     actual_indices.unsqueeze(-1).expand(-1, -1, width)
-                )
-                offset_range = torch.arange(width, device=device).view(1, 1, -1)
-                j_positions = actual_indices.unsqueeze(-1) + (offset_range - center)
-                valid_mask = (j_positions >= 0) & (j_positions < L_full)
+                )  # [B, k, width]
+                offset_range = torch.arange(width, device=device).view(1, 1, -1)  # [1, 1, width]
+                j_positions = actual_indices.unsqueeze(-1) + (offset_range - center)  # [B, k, width]
+                valid_mask = (j_positions >= 0) & (j_positions < L_full)  # [B, k, width]
                 log_source = torch.where(
                     source_for_topk > 1e-10,
                     torch.log(source_for_topk.clamp(min=1e-10)),
-                    torch.full_like(source_for_topk, -1e4)
+                    torch.full_like(source_for_topk, -1e10)
                 )  # [B, k, width]
-                log_source_masked = torch.where(valid_mask, log_source, torch.full_like(log_source, -1e4))
+                log_source_masked = torch.where(valid_mask, log_source, torch.full_like(log_source, -1e10))
                 j_positions_safe = torch.where(valid_mask, j_positions, torch.zeros_like(j_positions))
                 bias[:, 1:, :].scatter_(2, j_positions_safe, log_source_masked)
         else:
@@ -807,415 +734,67 @@ class CLSHybridToMeModel(HybridToMeModel):
         token_strength_no_cls = token_strength[:,1:]
         if k <= 0 or k > token_strength_no_cls.shape[1]:
             k = token_strength_no_cls.shape[1]
-
-        soft_sel = None
-        if self.soft_topk and self.total_merge_local > 0:
-            soft_sel = ThreTopK(token_strength_no_cls, k, temperature=30.0)
-
+        
         with torch.no_grad():
-            topk_vals, topk_indices = torch.topk(token_strength_no_cls.detach(), k, dim=1, largest=True, sorted=False)
-            topk_com = torch.gather(center_of_mass[:, 1:], 1, topk_indices)
-            sorted_order = torch.argsort(topk_com, dim=1)
-            sorted_topk_indices = torch.gather(topk_indices, 1, sorted_order)
-
-        topk_in_full = sorted_topk_indices + 1
-        topk_x_trace = torch.gather(x_local, 1, topk_in_full.unsqueeze(-1).expand(-1, -1, x_local.shape[-1]))
-        topk_size_trace = torch.gather(size_local, 1, topk_in_full.unsqueeze(-1).expand(-1, -1, size_local.shape[-1]))
-
-        if soft_sel is not None:
-            soft_w_sel = torch.gather(soft_sel, 1, sorted_topk_indices)
-            ste_w = 1.0 + (soft_w_sel - soft_w_sel.detach())
-            topk_x_trace = topk_x_trace * ste_w.unsqueeze(-1)
-
+            topk_vals, topk_indices = torch.topk(token_strength_no_cls.detach(), k, dim=1, largest=True, sorted=False)  # (B, k)
+            topk_com = torch.gather(center_of_mass, 1, topk_indices)  # (B, k)
+            sorted_order = torch.argsort(topk_com, dim=1)  # (B, k)
+            sorted_topk_indices = torch.gather(topk_indices, 1, sorted_order)  # (B, k)
+        
+        topk_x_trace = torch.gather(x_local, 1, sorted_topk_indices.unsqueeze(-1).expand(-1, -1, x_local.shape[-1]))
+        topk_size_trace = torch.gather(size_local, 1, sorted_topk_indices.unsqueeze(-1).expand(-1, -1, size_local.shape[-1]))
         topk_x = torch.cat([x_local[:, :1], topk_x_trace], dim=1)
         topk_size = torch.cat([size_local[:, :1, 0], topk_size_trace.squeeze(-1)], dim=-1).unsqueeze(-1)
 
         size_trace = topk_size
         if source_matrix is not None:
             with torch.no_grad():
-                # FP32-safe: bias 涉及 log(small) 与 -1e4 的 mask 值，在 fp16 下精度只有 ~1，
-                # 且 clamp(min=1e-10) 在 fp16 下下溢成 0 → log(0)=-inf。统一在 fp32 中算。
                 center = info_local["source_matrix_center"]
                 width = info_local["source_matrix_width"]
-                bias = torch.full((B, k+1, L_full), -1e4, device=device, dtype=torch.float32)
+                bias = torch.full((B, k+1, L_full), -1e10, device=device, dtype=x_local.dtype)
+                
                 bias[:, 0, :] = 0.0
-                actual_indices = topk_in_full
+
+                actual_indices = sorted_topk_indices + 1  # [B, k]
 
                 source_for_topk = torch.gather(
-                    source_matrix, 1,
+                    source_matrix, 
+                    1, 
                     actual_indices.unsqueeze(-1).expand(-1, -1, width)
-                ).float()  # 强制 fp32，避免 fp16 下的 underflow
-                offset_range = torch.arange(width, device=device).view(1, 1, -1)
-                j_positions = actual_indices.unsqueeze(-1) + (offset_range - center)
-                valid_mask = (j_positions >= 0) & (j_positions < L_full)
+                )  # [B, k, width]
+                
+                offset_range = torch.arange(width, device=device).view(1, 1, -1)  # [1, 1, width]
+                j_positions = actual_indices.unsqueeze(-1) + (offset_range - center)  # [B, k, width]
+                
+                valid_mask = (j_positions >= 0) & (j_positions < L_full)  # [B, k, width]
                 log_source = torch.where(
                     source_for_topk > 1e-10,
                     torch.log(source_for_topk.clamp(min=1e-10)),
-                    torch.full_like(source_for_topk, -1e4)
-                )
-                log_source_masked = torch.where(valid_mask, log_source, torch.full_like(log_source, -1e4))
+                    torch.full_like(source_for_topk, -1e10)
+                )  # [B, k, width]
+                log_source_masked = torch.where(valid_mask, log_source, torch.full_like(log_source, -1e10))
                 j_positions_safe = torch.where(valid_mask, j_positions, torch.zeros_like(j_positions))
                 bias[:, 1:, :].scatter_(2, j_positions_safe, log_source_masked)
-                # bias 维持 fp32；MyCrossAttention.forward 内部做 fp32-safe softmax。
-                # 加 attn_scores 时 fp16 + fp32 自动 upcast 为 fp32（PyTorch 行为），无类型错误。
         else:
-            bias = torch.zeros((B, k+1, L_full), device=device, dtype=torch.float32)
-
-        x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias) + topk_x
+            bias = torch.zeros((B, k+1, L_full), device=device, dtype=x_local.dtype)
+        
+        # 方案 A 续: lambda=1 且 total_merge_latent=0 时绕过 cross attention，保持 block3→block4 与 DeiT 一致
+        if self.total_merge_local == 0 and self.total_merge_latent == 0:
+            x_trace = topk_x
+        else:
+            x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias) + topk_x
 
         x_latent, size_latent, info_latent = self.latent(x_trace, size_trace)
+        # print('x_latent', x_latent.shape, 'size_latent', size_latent.shape)
 
-        cls_token_repr = x_latent[:, 0]
-        main_logits = self.head(cls_token_repr)
-
-        if soft_sel is not None and self.training:
-            soft_w_norm = soft_sel / soft_sel.sum(dim=1, keepdim=True).clamp(min=1e-6)
-            aux_repr = (x_local[:, 1:] * soft_w_norm.unsqueeze(-1)).sum(dim=1)
-            aux_logits = self.head(aux_repr)
-            logits = main_logits + self.soft_topk_aux_weight * aux_logits
-        else:
-            logits = main_logits
+        cls_token_repr = x_latent[:, 0]  # use cls token
+        # cls_token_repr = x_latent.mean(dim=1)  # use mean pooling
+        logits = self.head(cls_token_repr)
 
         aux = {"token_counts_local": info_local.get("token_counts_local", None)}
         return logits, aux
 
 
-class CLSDualBranchHybridToMeModel(nn.Module):
-    """P1 第二步：分支 A（无空间降采样）+ 分支 B（压缩 MergeNet）+ 轻量融合。
-
-    - 共享 ``branch_b.local.vit`` 的 patch/pos/cls 与 ``branch_a.local.vit``（避免优化器重复计数，见 ``parameters``）。
-    - ``forward(..., active_branch='both'|'a'|'b')``：交替训练时可只跑单分支以省显存。
-    """
-
-    def __init__(
-        self,
-        arch='small',
-        img_size=224,
-        patch_size=16,
-        num_classes=1000,
-        fusion_type='cat_linear',
-        branch_b_lambda_local=4.0,
-        branch_b_total_merge_latent=0,
-        branch_b_dtem_window_size=None,
-        branch_b_use_softkmax=None,
-        branch_b_swa_size=None,
-        pretrained=False,
-        freeze_branch_a=False,
-        **common_kwargs,
-    ):
-        super().__init__()
-        self.num_classes = num_classes
-        self.fusion_type = fusion_type
-
-        kw_a = dict(common_kwargs)
-        kw_a['lambda_local'] = 1.0
-        kw_a['total_merge_latent'] = 0
-
-        kw_b = dict(common_kwargs)
-        kw_b['lambda_local'] = float(branch_b_lambda_local)
-        kw_b['total_merge_latent'] = int(branch_b_total_merge_latent)
-        # Branch-B specific overrides only when explicitly provided.
-        if branch_b_dtem_window_size is not None:
-            kw_b['dtem_window_size'] = branch_b_dtem_window_size
-        if branch_b_use_softkmax is not None:
-            kw_b['use_softkmax'] = bool(branch_b_use_softkmax)
-        if branch_b_swa_size is not None:
-            kw_b['swa_size'] = branch_b_swa_size
-
-        self.branch_a = CLSHybridToMeModel(
-            arch=arch,
-            remove_decoder_cross_attention=True,
-            pretrained=False,
-            num_classes=num_classes,
-            img_size=img_size,
-            patch_size=patch_size,
-            **kw_a,
-        )
-        self.branch_b = CLSHybridToMeModel(
-            arch=arch,
-            remove_decoder_cross_attention=True,
-            pretrained=False,
-            num_classes=num_classes,
-            img_size=img_size,
-            patch_size=patch_size,
-            **kw_b,
-        )
-
-        if pretrained:
-            self.branch_a._load_full_pretrained_weights(
-                pretrained, img_size,
-                pretrained_type=common_kwargs.get('pretrained_type', 'vit'),
-                load_full=common_kwargs.get('load_full_pretrained', True),
-            )
-
-        self._tie_shared_embeddings()
-
-        if fusion_type == 'cat_linear':
-            self.fusion_head = nn.Linear(2 * num_classes, num_classes)
-            with torch.no_grad():
-                W = torch.zeros(num_classes, 2 * num_classes)
-                idx = torch.arange(num_classes)
-                W[idx, idx] = 0.5
-                W[idx, idx + num_classes] = 0.5
-                self.fusion_head.weight.copy_(W)
-                self.fusion_head.bias.zero_()
-        elif fusion_type == 'scalar_blend':
-            self.branch_mix_logit = nn.Parameter(torch.zeros(1))
-        else:
-            raise ValueError(f"Unknown fusion_type: {fusion_type}")
-
-        if freeze_branch_a:
-            self.freeze_branch_a()
-
-    def _tie_shared_embeddings(self):
-        """让 branch_a 与 branch_b 在以下五组参数上 tied（共享同一份权重 & 反传梯度合并）：
-
-        (1) 低层视觉先验：``patch_embed`` / ``cls_token`` / ``pos_embed`` / ``norm_pre``
-            两路看到的 token 化方式与位置编码必须一致，否则 fusion 输出无可比性。
-
-        (2) ``local.vit.blocks``（4 层 LocalBlock，windowed local attention）
-            前置约束：``LocalEncoder`` 已统一 ``self.use_global_attn = False``，
-            两路结构与参数 shape 完全一致才能 tie。共享后两个分支的局部语义
-            学习被合并到同一组权重上，仅在 token 调度（A 不合并 / B 合并 75%）
-            上分化。
-
-        (3) ``local.metric_layers``（DTEM metric heads，每层一个 Linear）
-            两路对"哪些 token 重要"的判断必须一致，让 fusion 时两路 logits 是基
-            于同一种"重要性观点"得到的。
-
-        (4) ``latent``（LatentEncoder，整 8 层 LatentBlock + norm）
-            两路最终都要在「同一个 latent 空间」收敛才能让 fusion_head 学到的
-            线性组合具备语义可解释性。共享 latent 是双分支真正不同于"两个独立
-            模型 ensemble"的核心机制。
-
-        (5) ``encode_cross_attention`` / ``decode_cross_attention``
-            分支 A 在 ``total_merge_local==0 and total_merge_latent==0`` 时直接
-            ``x_trace = topk_x`` 跳过 encode_cross_attention，所以 A 路径不会前向
-            也不会反传梯度；分支 B 正常使用。decode_cross_attention 在 CLS 路径
-            两路都不用（CLS 走 latent->cls->head）。tie 一下纯粹去掉 dead 副本，
-            行为完全等价。
-
-        不共享（保留独立）：
-          - ``head``（CLS 头）：硬约束。tie 会破坏双分支训练协议——logits_a 与
-            logits_b 通过同一线性层从不同 cls 计算得到，会让 L_A / L_B 在最终
-            输出层强耦合，并使 fusion 退化为"单分类器多视角集成"，失去"两个
-            独立分类器 + fusion 学组合权重"的语义。
-        """
-        branch_a, branch_b = self.branch_a, self.branch_b
-        vit_a = branch_a.local.vit
-        vit_b = branch_b.local.vit
-
-        # (1) 低层视觉先验
-        vit_a.patch_embed = vit_b.patch_embed
-        if hasattr(vit_b, 'cls_token') and vit_b.cls_token is not None:
-            vit_a.cls_token = vit_b.cls_token
-        vit_a.pos_embed = vit_b.pos_embed
-        if hasattr(vit_b, 'norm_pre') and vit_b.norm_pre is not None:
-            vit_a.norm_pre = vit_b.norm_pre
-
-        # (2) LocalEncoder 4 层 LocalBlock
-        # 前置：LocalEncoder.__init__ 已强制 use_global_attn=False，两路结构一致
-        assert not branch_a.local.use_global_attn and not branch_b.local.use_global_attn, \
-            "[_tie_shared_embeddings] 期望两路 LocalEncoder 都使用 LocalBlock（use_global_attn=False）"
-        vit_a.blocks = vit_b.blocks
-        # 同步 LocalEncoder 顶层 norm。
-        # 修订（2026-05-06）：``LocalEncoder.__init__`` 已把 ``self.vit.norm`` 替换为
-        # ``nn.Identity()``，此处 tie 实际上是 Identity↔Identity 的同步，仅为对称性保留，
-        # 不影响 forward 行为；保留这段代码是为了在未来若把 LocalEncoder 末端 LN 改回
-        # 真 LN 时仍能正确 tie（避免分支 A/B 用了不同 LN 权重）。
-        if hasattr(vit_b, 'norm') and vit_b.norm is not None:
-            vit_a.norm = vit_b.norm
-
-        # (3) DTEM metric heads
-        branch_a.local.metric_layers = branch_b.local.metric_layers
-
-        # (4) LatentEncoder（仅当两路都有 latent 时才 tie；latent_depth>0 默认成立）
-        if branch_a.latent is not None and branch_b.latent is not None:
-            branch_a.latent = branch_b.latent
-
-        # (5) cross attention 模块（A 路径不前向，B 路径才用；共享纯省 dead 参数）
-        if hasattr(branch_a, 'encode_cross_attention') and hasattr(branch_b, 'encode_cross_attention'):
-            branch_a.encode_cross_attention = branch_b.encode_cross_attention
-        if hasattr(branch_a, 'decode_cross_attention') and hasattr(branch_b, 'decode_cross_attention'):
-            branch_a.decode_cross_attention = branch_b.decode_cross_attention
-
-    def freeze_branch_a(self):
-        for p in self.branch_a.parameters():
-            p.requires_grad = False
-
-    def unfreeze_branch_a(self):
-        for p in self.branch_a.parameters():
-            p.requires_grad = True
-
-    def load_branch_a_from_single_model_checkpoint(self, path, map_location='cpu',
-                                                    align_branch_b_head=True,
-                                                    fusion_init='prefer_a'):
-        """加载「单分支 A」checkpoint（``hybridtomevit_small_cls_branch_a`` 训练得到）到 ``branch_a``。
-
-        warm-start 排异反应「残余项」修复（2026-05-15）：
-        ----------------------------------------------------------------------
-        前置上下文（与 ``in1k_trainer`` 中 ``_split_optimizer_for_branch_a`` /
-        ``_clip_params_for_step`` 配合）：lr_scale=0 + clip-local 已经把"共享 encoder
-        被 L_b 噪声反传更新"和"unfreeze 时 AdamW v_t shock"这两条根因封死。但
-        eval_top1 在 stage2 epoch 0 仍然会从 stage1 的 ~73 跌到 ~60，原因在于
-        ``CLSDualBranchHybridToMeModel.__init__`` 默认状态下的两个"残余项"：
-
-        (α) ``branch_b.head`` 与 ``branch_a.head`` **不** tie（参见
-            ``_tie_shared_embeddings`` 的"不共享"注释——硬约束，否则会破坏双分支
-            训练协议）。因此 warm-start 把 stage1 的 head 灌进 ``branch_a.head``
-            后，``branch_b.head`` 仍是 ``trunc_normal_(std=0.02)`` 随机初始化。
-            forward 时 ``logits_b = head_b(cls_b_repr)`` 是高熵噪声，
-            ``L_b ≈ ln(num_classes) ≈ 4.6`` 主导总 loss；即便 lr_scale=0 冻住
-            shared encoder 的"更新"，head_b 的 SGD 步会在前 ~几个 batch 把
-            ``|W_b|`` 推大，``logits_b`` 开始 confidently 预测错类。
-        (β) ``fusion_head`` 默认 ``W[i,i]=W[i,i+nc]=0.5, bias=0``，对"两路同等
-            可信"的 from-scratch 场景是合理初始化，但 warm-start 时
-            ``logits_a`` 是 stage1 金标准、``logits_b`` 是噪声，50/50 融合等于
-            把 a 的精度直接腰斩 ⇒ ``eval_top1`` 在 epoch 0 就从 73 掉到 60+。
-
-        本方法在 warm-start 时一次性把两条都修了：
-
-        Args:
-            align_branch_b_head: 把刚刚加载到 ``branch_a.head`` 的 stage1 head
-                权重**直接复制**到 ``branch_b.head``。两路 head 不再共享（保持
-                双分支训练协议），但起点完全一致，L_b 初始值与 L_a 同量级，
-                ``head_b`` 的梯度从一开始就是"如何在压缩后的 cls 上微调"而非
-                "如何从随机噪声中恢复分类信号"。
-            fusion_init:
-                - ``'prefer_a'``（默认，warm-start 推荐）：把 fusion_head 重置为
-                  ``W[i,i]=1.0`` (branch_a 部分)、``W[i,i+nc]=0.0`` (branch_b
-                  部分)、``bias=0``。等价于 epoch 0 的 ``logits_fused = logits_a``，
-                  eval_top1 锁死在 stage1 水平。随后 ``W[i,i+nc]`` 通过 L_fused
-                  的梯度自适应吸收 branch_b 的信号。
-                - ``'balanced'``：保留 __init__ 中的 0.5/0.5（适合 from-scratch 双
-                  路对称训练；warm-start 不推荐，会触发上面 (β) 的问题）。
-                - ``'keep'`` / ``None``：不动 fusion_head，沿用当前状态（用于
-                  resume 等更复杂场景）。
-        """
-        raw = torch.load(path, map_location=map_location)
-        if isinstance(raw, dict) and 'state_dict' in raw:
-            sd = raw['state_dict']
-        elif isinstance(raw, dict) and 'model' in raw:
-            sd = raw['model']
-        elif isinstance(raw, dict) and 'state_dict' not in raw and 'model' not in raw:
-            sd = raw
-        else:
-            sd = raw
-        new_sd = {}
-        for k, v in sd.items():
-            k = k.replace('module.', '')
-            new_sd['branch_a.' + k] = v
-        missing, unexpected = self.load_state_dict(new_sd, strict=False)
-
-        # (α) 把 stage1 head 复制到 branch_b.head，消除 logits_b 的随机噪声起点。
-        # 注意：用 .data.copy_ 而非赋值同一引用——两路 head 仍是独立 nn.Linear，
-        # 后续训练各自更新；只是 epoch 0 起点完全一致，避免随机 head 噪声反传
-        # 污染 fusion_head / L_b 梯度。
-        if align_branch_b_head and hasattr(self, 'branch_a') and hasattr(self, 'branch_b'):
-            head_a = getattr(self.branch_a, 'head', None)
-            head_b = getattr(self.branch_b, 'head', None)
-            if (
-                head_a is not None and head_b is not None
-                and hasattr(head_a, 'weight') and hasattr(head_b, 'weight')
-                and head_a.weight.shape == head_b.weight.shape
-            ):
-                with torch.no_grad():
-                    head_b.weight.data.copy_(head_a.weight.data)
-                    if (getattr(head_a, 'bias', None) is not None
-                            and getattr(head_b, 'bias', None) is not None
-                            and head_a.bias.shape == head_b.bias.shape):
-                        head_b.bias.data.copy_(head_a.bias.data)
-
-        # (β) 重置 fusion_head，让 epoch 0 的 logits_fused 等于 logits_a，
-        # eval 锁在 stage1 水平。仅对 cat_linear 融合生效（scalar_blend 只有
-        # 一个标量 mix logit，由 sigmoid(0)=0.5 兜底，本来就近似 50/50；
-        # 如果未来要 warm-start scalar_blend，可在此把 branch_mix_logit 推到
-        # 大正值，但当前训练协议默认走 cat_linear，先不动）。
-        if (fusion_init == 'prefer_a' and getattr(self, 'fusion_type', None) == 'cat_linear'
-                and hasattr(self, 'fusion_head')):
-            with torch.no_grad():
-                nc = self.num_classes
-                W = torch.zeros(nc, 2 * nc, device=self.fusion_head.weight.device,
-                                dtype=self.fusion_head.weight.dtype)
-                idx = torch.arange(nc)
-                W[idx, idx] = 1.0  # branch_a 全权
-                # branch_b 部分留 0，让 L_fused 的梯度从 0 开始自适应吸收 logits_b
-                self.fusion_head.weight.data.copy_(W)
-                if getattr(self.fusion_head, 'bias', None) is not None:
-                    self.fusion_head.bias.data.zero_()
-        elif fusion_init == 'balanced' and getattr(self, 'fusion_type', None) == 'cat_linear' \
-                and hasattr(self, 'fusion_head'):
-            with torch.no_grad():
-                nc = self.num_classes
-                W = torch.zeros(nc, 2 * nc, device=self.fusion_head.weight.device,
-                                dtype=self.fusion_head.weight.dtype)
-                idx = torch.arange(nc)
-                W[idx, idx] = 0.5
-                W[idx, idx + nc] = 0.5
-                self.fusion_head.weight.data.copy_(W)
-                if getattr(self.fusion_head, 'bias', None) is not None:
-                    self.fusion_head.bias.data.zero_()
-        # 其他情况（'keep' / None / 未知值）：保留当前 fusion_head 状态不动。
-
-        return missing, unexpected
-
-    def parameters(self, recurse=True):
-        seen = set()
-        for p in nn.Module.parameters(self, recurse):
-            pid = id(p)
-            if pid in seen:
-                continue
-            seen.add(pid)
-            yield p
-
-    def forward(self, x, active_branch='both'):
-        """
-        Args:
-            active_branch: ``both`` | ``a`` | ``b`` — 仅前向单分支时用于 T2 省显存 / 分段阶段 1。
-        """
-        logits_a = logits_b = None
-        aux_a = aux_b = {}
-
-        if active_branch in ('both', 'a'):
-            logits_a, aux_a = self.branch_a(x)
-        if active_branch in ('both', 'b'):
-            logits_b, aux_b = self.branch_b(x)
-
-        if active_branch == 'a':
-            aux = {
-                'dual_branch': True,
-                'logits_a': logits_a,
-                'logits_b': None,
-                'logits_fused': logits_a,
-                'active_branch': 'a',
-            }
-            return logits_a, aux
-
-        if active_branch == 'b':
-            aux = {
-                'dual_branch': True,
-                'logits_a': None,
-                'logits_b': logits_b,
-                'logits_fused': logits_b,
-                'active_branch': 'b',
-            }
-            return logits_b, aux
-
-        if self.fusion_type == 'cat_linear':
-            logits_fused = self.fusion_head(torch.cat([logits_a, logits_b], dim=-1))
-        else:
-            w = torch.sigmoid(self.branch_mix_logit)
-            logits_fused = w * logits_a + (1.0 - w) * logits_b
-
-        aux = {
-            'dual_branch': True,
-            'logits_a': logits_a,
-            'logits_b': logits_b,
-            'logits_fused': logits_fused,
-            'active_branch': 'both',
-            'token_counts_local': aux_a.get('token_counts_local'),
-        }
-        return logits_fused, aux
 
 
 @register_model
@@ -1242,62 +821,6 @@ def hybridtomevit_small_cls(**kwargs):
     """HybridToMe ViT Small model"""
     model = CLSHybridToMeModel(arch='small', remove_decoder_cross_attention=True, **kwargs)
     return model
-
-
-@register_model
-def hybridtomevit_small_cls_branch_a(pretrained=False, num_classes=1000, **kwargs):
-    """P1 分支 A：Local 4L（windowed local attention）+ Latent 8L，无空间 token 降采样。
-
-    固定 ``lambda_local=1`` → ``total_merge_local=0``，``total_merge_latent=0``，
-    与 ``CLSHybridToMeModel`` 中跳过 cross-attn 残差、全程不降采样的前向路径一致，
-    用于与 DeiT-Small 同数据/增强/epoch/优化器协议对齐的对照实验。
-
-    历史行为变更（2026-05-05）：原先 ``LocalEncoder`` 在 ``total_merge_local==0`` 时切到
-    全局 ``TimmBlock``，本工厂因此曾等价于 12 层全局 ViT。为了让双分支 T1/T2/T3 能
-    tie ``local.vit.blocks``，``LocalEncoder`` 已统一为 ``LocalBlock``（windowed local
-    attention，``local_window=local_block_window``，默认 16）。本工厂创建出的模型
-    的 attention 也随之变成 windowed local。参数命名（``norm1``/``attn.qkv``/``attn.proj``/
-    ``norm2``/``mlp.fc1``/``mlp.fc2``）与原 TimmBlock 完全一致，旧 P1 第一步 ckpt 仍然
-    可以 ``strict=False`` 加载，作为权重初始化使用，但 attention 行为已是 windowed。
-    """
-    kwargs = dict(kwargs)
-    kwargs['lambda_local'] = 1.0
-    kwargs['total_merge_latent'] = 0
-    model = CLSHybridToMeModel(
-        arch='small',
-        remove_decoder_cross_attention=True,
-        pretrained=pretrained,
-        num_classes=num_classes,
-        **kwargs,
-    )
-    return model
-
-
-@register_model
-def hybridtomevit_small_cls_dual_ab(pretrained=False, num_classes=1000, **kwargs):
-    """P1 第二步：双分支 A（无降采样）+ B（压缩）+ 融合；训练策略由 ``in1k_trainer`` 的 ``--dual_branch_train_mode`` 控制。"""
-    kwargs = dict(kwargs)
-    fusion_type = kwargs.pop('fusion_type', 'cat_linear')
-    branch_b_lambda_local = float(kwargs.pop('branch_b_lambda_local', 4.0))
-    branch_b_total_merge_latent = int(kwargs.pop('branch_b_total_merge_latent', 0))
-    branch_b_dtem_window_size = kwargs.pop('branch_b_dtem_window_size', None)
-    branch_b_use_softkmax = kwargs.pop('branch_b_use_softkmax', None)
-    branch_b_swa_size = kwargs.pop('branch_b_swa_size', None)
-    freeze_branch_a = bool(kwargs.pop('freeze_branch_a', False))
-    return CLSDualBranchHybridToMeModel(
-        arch='small',
-        fusion_type=fusion_type,
-        branch_b_lambda_local=branch_b_lambda_local,
-        branch_b_total_merge_latent=branch_b_total_merge_latent,
-        branch_b_dtem_window_size=branch_b_dtem_window_size,
-        branch_b_use_softkmax=branch_b_use_softkmax,
-        branch_b_swa_size=branch_b_swa_size,
-        pretrained=pretrained,
-        num_classes=num_classes,
-        freeze_branch_a=freeze_branch_a,
-        **kwargs,
-    )
-
 
 @register_model
 def hybridtomevit_small_cls_ext(**kwargs):

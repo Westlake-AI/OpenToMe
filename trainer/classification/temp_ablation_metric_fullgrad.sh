@@ -1,16 +1,20 @@
 #!/bin/bash
-# bash c100_new_200e.sh 2>&1 | tee train_log_$(date +%Y%m%d_%H%M%S).txt
-# mergenet_new (HybridToMe), 标准 200 epoch 训练
+# temp_ablation_metric_fullgrad.sh — 消融实验：Metric Layer 梯度全放行
+#
+# 对比 temp.sh (metric_grad_scale=0.1)，本脚本设置 metric_grad_scale=1.0
+# 使 LocalEncoder metric_layers 的输入不再 detach，分类 loss 梯度完整回传到
+# 合并决策参数，验证端到端可微 metric 对训练质量的影响。
+#
+# 风险：梯度可能过大导致 metric_layer 不稳定，需配合 clip_grad 观察。
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 export HF_ENDPOINT=https://hf-mirror.com
 
 DATA_DIR=/liziqing/yuhao/yukai/data
 OUTPUT_DIR=./work_dirs/classification
-EXP_NAME=cifar100_mergenet_small_new_200e_dtem8_test
+EXP_NAME=cifar100_ablation_metric_fullgrad
 
-# OPENTOME_MERGENET_IMPL 不设置则默认 new
-CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node 1 "${SCRIPT_DIR}/in1k_trainer.py" \
+CUDA_VISIBLE_DEVICES=4,5 torchrun --standalone --nproc_per_node 2 "${SCRIPT_DIR}/in1k_trainer.py" \
   --data_dir ${DATA_DIR} \
   --dataset CIFAR100 \
   --train_split train \
@@ -24,11 +28,12 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node 1 "${SCRIPT_DIR}/i
   --lambda_local 4.0 \
   --total_merge_latent 0 \
   --use_softkmax \
+  --metric_grad_scale 1.0 \
   --swa_size 256 \
   --batch_size 50 \
   --epochs 200 \
-  --lr 5e-5 \
-  --lr_local 5e-5 \
+  --lr 2e-4 \
+  --lr_local 5e-4 \
   --weight_decay 0.05 \
   --dtem_window_size 8 \
   --sched cosine \
@@ -42,4 +47,4 @@ CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nproc_per_node 1 "${SCRIPT_DIR}/i
   --amp \
   --output ${OUTPUT_DIR} \
   --experiment ${EXP_NAME} \
-  --seed 42 \
+  --seed 42

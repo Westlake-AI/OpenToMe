@@ -1,25 +1,33 @@
 #!/bin/bash
-# bash c100_tome_200e.sh 2>&1 | tee train_log_$(date +%Y%m%d_%H%M%S).txt
-# ToME ablation: replaces DTEM+Perceiver with pure ToME bipartite matching, 标准 200 epoch 训练
+# ======================================================================
+# A0 对照：post-hoc ToME + 全局 timm Block（无 LocalBlock 窗口）
+# 与 c100_a0.sh 仅 local 注意力范围不同；latent 等同（total_merge_latent=0）
+# ======================================================================
+# bash c100_a0_global.sh 2>&1 | tee train_log_A0global_$(date +%Y%m%d_%H%M%S).txt
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 export HF_ENDPOINT=https://hf-mirror.com
 
 DATA_DIR=/liziqing/yuhao/yukai/data
 OUTPUT_DIR=./work_dirs/classification
-EXP_NAME=cifar100_tomenet_small_200e
+EXP_NAME=cifar100_A0_global_patch8_purelatent
 
-OPENTOME_MERGENET_IMPL=tome CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nproc_per_node 2 "${SCRIPT_DIR}/in1k_trainer.py" \
+OPENTOME_MERGENET_IMPL=tome \
+CUDA_VISIBLE_DEVICES=4,5 torchrun --standalone --nproc_per_node 2 \
+  "${SCRIPT_DIR}/in1k_trainer.py" \
   --data_dir ${DATA_DIR} \
   --dataset CIFAR100 \
   --train_split train \
   --val_split val \
-  --model tomevit_small_cls \
+  --model tomevit_small_cls_a0_global \
   --num_classes 100 \
   --img_size 224 \
   --patch_size 8 \
   --lambda_local 4.0 \
   --total_merge_latent 0 \
+  --local_block_window 16 \
+  --dtem_window_size 7 \
+  --dtem_t 1 \
   --batch_size 50 \
   --epochs 200 \
   --lr 1e-3 \
