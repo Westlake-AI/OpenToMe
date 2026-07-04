@@ -35,8 +35,12 @@ def parse_r(
 
     min_val = int(r * (1.0 - inflect))
     max_val = 2 * r - min_val
-    step = (max_val - min_val) / (num_layers - 1)
-    r_list = [int(min_val + step * i) for i in range(num_layers)]
+    if num_layers <= 1:
+        # Degenerate schedule: a single layer absorbs the full r.
+        r_list = [int(r)] * num_layers
+    else:
+        step = (max_val - min_val) / (num_layers - 1)
+        r_list = [int(min_val + step * i) for i in range(num_layers)]
 
     if total is not None:
         remainder = total - sum(r_list)

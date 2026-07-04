@@ -401,7 +401,6 @@ def biased_local_attention(
             out = out.transpose(1, 2).contiguous()
         
         return out.to(output_dtype)
-    # import pdb;pdb.set_trace()
     # ========================================================================
     # 通用路径：构造对齐到 8 的倍数的物理张量
     # ========================================================================

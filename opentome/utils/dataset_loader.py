@@ -13,6 +13,19 @@ from torchvision.datasets import CIFAR10, CIFAR100
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD, create_dataset, create_loader, AugMixDataset
 
 
+class TransformForwardingSubset(Subset):
+    """Subset wrapper that lets timm.create_loader set the base dataset transform."""
+
+    @property
+    def transform(self):
+        return getattr(self.dataset, "transform", None)
+
+    @transform.setter
+    def transform(self, value):
+        if hasattr(self.dataset, "transform"):
+            self.dataset.transform = value
+
+
 def create_dataset(dataset_path, batch_size=32, num_workers=4, input_size=224, mean=None, std=None, return_dataset_only=False):
     """
     Create a DataLoader for the ImageNet dataset.
@@ -104,8 +117,8 @@ def build_dataset(args, data_config, collate_fn, num_aug_splits):
     # optional debug subset for sanity checks
     if args.debug_subset and args.debug_subset > 0:
         subset_size = int(args.debug_subset)
-        dataset_train = Subset(dataset_train, list(range(min(subset_size, len(dataset_train)))))
-        dataset_eval = Subset(dataset_eval, list(range(min(subset_size, len(dataset_eval)))))
+        dataset_train = TransformForwardingSubset(dataset_train, list(range(min(subset_size, len(dataset_train)))))
+        dataset_eval = TransformForwardingSubset(dataset_eval, list(range(min(subset_size, len(dataset_eval)))))
 
     # create data loaders w/ augmentation pipeiine
     train_interpolation = args.train_interpolation
@@ -138,6 +151,7 @@ def build_dataset(args, data_config, collate_fn, num_aug_splits):
         collate_fn=collate_fn,
         pin_memory=args.pin_mem,
         use_multi_epochs_loader=args.use_multi_epochs_loader,
+        persistent_workers=args.workers > 0,
         worker_seeding=args.worker_seeding,
     )
 
@@ -154,6 +168,7 @@ def build_dataset(args, data_config, collate_fn, num_aug_splits):
         distributed=args.distributed,
         crop_pct=data_config['crop_pct'],
         pin_memory=args.pin_mem,
+        persistent_workers=args.workers > 0,
     )
 
     return loader_train, loader_eval

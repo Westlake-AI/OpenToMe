@@ -2,6 +2,7 @@
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from timm.models.vision_transformer import VisionTransformer, Block as TimmBlock
 from timm.layers import trunc_normal_
 from timm.models.registry import register_model
@@ -11,6 +12,43 @@ from opentome.timm.dtem import DTEMBlock
 from opentome.tome.tome import token_unmerge_from_map, parse_r
 from opentome.timm.bias_local_attn import LocalBlock
 from opentome.utils.thetopk import ThreTopK
+
+
+MERGENET_SMALL_CANONICAL_KWARGS = {
+    "lambda_local": 4.0,
+    "total_merge_latent": 0,
+    "dtem_window_size": 8,
+    "use_softkmax": True,
+    "swa_size": 256,
+    "dtem_feat_dim": 64,
+    "dtem_t": 1,
+}
+
+
+def _with_mergenet_small_defaults(kwargs):
+    """Canonical single-branch MergeNet-B config."""
+    resolved = dict(kwargs)
+    for key, value in MERGENET_SMALL_CANONICAL_KWARGS.items():
+        if resolved.get(key, None) is None:
+            resolved[key] = value
+    return resolved
+
+
+def _with_mergenet_branch_b_defaults(common_kwargs):
+    """Branch B is the same compressed MergeNet as ``mergenet_small_cls``."""
+    resolved = _with_mergenet_small_defaults(common_kwargs)
+    resolved["lambda_local"] = MERGENET_SMALL_CANONICAL_KWARGS["lambda_local"]
+    resolved["total_merge_latent"] = MERGENET_SMALL_CANONICAL_KWARGS["total_merge_latent"]
+    resolved["use_softkmax"] = MERGENET_SMALL_CANONICAL_KWARGS["use_softkmax"]
+    return resolved
+
+
+def _torch_load_checkpoint(path, map_location='cpu'):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
 
 class MyCrossAttention(nn.Module):
     """
@@ -96,28 +134,44 @@ class MyCrossAttention(nn.Module):
         else:
             B = Bq
 
-        # Compute attention scores: Q @ K^T / sqrt(d_k)
-        # q_proj: (B, num_heads, Nq, head_dim)
-        # k_proj: (B, num_heads, Nk, head_dim)
-        attn_scores = torch.matmul(q_proj, k_proj.transpose(-2, -1)) / (self.head_dim ** 0.5)
-        # attn_scores: (B, num_heads, Nq, Nk)
-        
-        # Apply attention bias/mask if provided
-        if mask is not None:
+        if mask is None:
+            # Source-matrix-off is mathematically an all-zero attention bias.
+            # Use SDPA to avoid materializing the dense [B, H, Nq, Nk] score tensor.
+            dropout_p = self.attn_drop if self.training else 0.0
+            q_fast, k_fast, v_fast = q_proj, k_proj, v_proj
+            if q_fast.is_cuda and orig_dtype in (torch.float16, torch.bfloat16):
+                q_fast = q_fast.to(orig_dtype)
+                k_fast = k_fast.to(orig_dtype)
+                v_fast = v_fast.to(orig_dtype)
+            context = F.scaled_dot_product_attention(
+                q_fast, k_fast, v_fast,
+                attn_mask=None,
+                dropout_p=dropout_p,
+                is_causal=False,
+            )
+            context = context.to(dtype=q_proj.dtype)
+        else:
+            # Compute attention scores: Q @ K^T / sqrt(d_k)
+            # q_proj: (B, num_heads, Nq, head_dim)
+            # k_proj: (B, num_heads, Nk, head_dim)
+            attn_scores = torch.matmul(q_proj, k_proj.transpose(-2, -1)) / (self.head_dim ** 0.5)
+            # attn_scores: (B, num_heads, Nq, Nk)
+
+            # Apply attention bias/mask if provided
             # mask: (B, Nq, Nk) -> (B, 1, Nq, Nk)
             attn_scores = attn_scores + mask.unsqueeze(1).float()
 
-        # FP32-safe softmax: AMP fp16 下，attention logits 范围常超过 fp16 可表示范围，
-        # 且 mask=-1e4 的 row 在 fp16 softmax 中会出现 0/0 → NaN。timm/HF 标配把
-        # softmax 提到 fp32 做，再 cast 回原 dtype，对显存与吞吐影响微乎其微。
-        attn_probs = torch.softmax(attn_scores, dim=-1)
-        attn_probs = torch.nn.functional.dropout(attn_probs, p=self.attn_drop, training=self.training)
-        
-        # Weighted sum: attn_probs @ V
-        # attn_probs: (B, num_heads, Nq, Nk)
-        # v_proj: (B, num_heads, Nk, head_dim)
-        context = torch.matmul(attn_probs, v_proj)  # (B, num_heads, Nq, head_dim)
-        
+            # FP32-safe softmax: AMP fp16 下，attention logits 范围常超过 fp16 可表示范围，
+            # 且 mask=-1e4 的 row 在 fp16 softmax 中会出现 0/0 -> NaN。timm/HF 标配把
+            # softmax 提到 fp32 做，再 cast 回原 dtype，对显存与吞吐影响微乎其微。
+            attn_probs = torch.softmax(attn_scores, dim=-1)
+            attn_probs = torch.nn.functional.dropout(attn_probs, p=self.attn_drop, training=self.training)
+
+            # Weighted sum: attn_probs @ V
+            # attn_probs: (B, num_heads, Nq, Nk)
+            # v_proj: (B, num_heads, Nk, head_dim)
+            context = torch.matmul(attn_probs, v_proj)  # (B, num_heads, Nq, head_dim)
+
         # Transpose back and reshape: (B, num_heads, Nq, head_dim) -> (B, Nq, C)
         context = context.transpose(1, 2).reshape(B, Nq, self.embed_dim)
 
@@ -144,7 +198,8 @@ class LocalEncoder(nn.Module):
                  local_depth: int = 4, drop_rate=0.0, attn_drop_rate=0.0, drop_path_rate=0.0,
                  dtem_feat_dim=None, dtem_window_size: int = None, dtem_t: int = 1,
                  total_merge_local: int = 0, use_softkmax: bool = False, swa_size: int = None,
-                 local_block_window: int = 16, metric_grad_scale: float = 0.1):
+                 local_block_window: int = 16, metric_grad_scale: float = 0.1,
+                 source_trace_mode: str = "center"):
         super().__init__()
 
         if local_depth <= 0:
@@ -222,16 +277,17 @@ class LocalEncoder(nn.Module):
         self.merge_block = DTEMMergeOnly()
 
         window_size = dtem_window_size if dtem_window_size is not None else 0
+        use_source_matrix = source_trace_mode in ("matrix", "detached")
         self._tome_info = {
             "r": None,
             "size": None,
             "source_matrix": None,
             "total_merge": total_merge_local,
-            "trace_source": True,
+            "trace_source": use_source_matrix,
             "prop_attn": True,
             "class_token": True,
             "distill_token": False,
-            "source_tracking_mode": "matrix",
+            "source_tracking_mode": "matrix" if use_source_matrix else "none",
             "k2": None,
             "tau1": 1.0,
             "tau2": 30.0,
@@ -241,6 +297,7 @@ class LocalEncoder(nn.Module):
             "use_softkmax": use_softkmax,
             "swa_size": swa_size,
             "local_depth": local_depth,
+            "source_trace_mode": source_trace_mode,
         }
         # 共享 info 给 merge block
         self.merge_block._tome_info = self._tome_info
@@ -282,6 +339,39 @@ class LocalEncoder(nn.Module):
             denom = source_matrix.sum(dim=-1, keepdim=True).clamp(min=1e-6)
         return summed / denom
 
+    @staticmethod
+    def _uses_source_matrix(source_trace_mode: str) -> bool:
+        return source_trace_mode in ("matrix", "detached")
+
+    def _prepare_trace_for_forward(self):
+        source_trace_mode = self._tome_info.get("source_trace_mode", "center")
+        use_source_matrix = self._uses_source_matrix(source_trace_mode)
+
+        # Keep the legacy flags aligned with the explicit mode so older merge
+        # paths cannot silently re-enable dense source tracing.
+        self._tome_info["trace_source"] = use_source_matrix
+        self._tome_info["source_tracking_mode"] = "matrix" if use_source_matrix else "none"
+        self._tome_info["source_matrix"] = None
+        self._tome_info["token_center"] = None
+        self._tome_info.pop("token_center_of_mass", None)
+        self._tome_info.pop("source_matrix_center", None)
+        self._tome_info.pop("source_matrix_width", None)
+        return source_trace_mode, use_source_matrix
+
+    def _finalize_trace_for_forward(self, source_matrix):
+        source_trace_mode = self._tome_info.get("source_trace_mode", "center")
+        use_source_matrix = self._uses_source_matrix(source_trace_mode)
+        if not use_source_matrix and source_matrix is not None:
+            raise RuntimeError(
+                f"source_matrix was allocated with source_trace_mode={source_trace_mode!r}; "
+                "center/none modes must keep dense source tracing disabled."
+            )
+        if not use_source_matrix:
+            self._tome_info.pop("source_matrix_center", None)
+            self._tome_info.pop("source_matrix_width", None)
+        self._tome_info["source_matrix"] = source_matrix if use_source_matrix else None
+        return self._tome_info["source_matrix"]
+
     def forward(self, x):
         x = self.vit.patch_embed(x)  # automatically inserted cls_token after patch_embed
         x = self.vit._pos_embed(x)
@@ -304,7 +394,7 @@ class LocalEncoder(nn.Module):
         )
         self._tome_info["r"] = r_list
         self._tome_info["size"] = torch.ones_like(x[..., 0:1])
-        self._tome_info["source_matrix"] = None
+        self._prepare_trace_for_forward()
         self._tome_info["token_counts_local"] = []
 
         size = self._tome_info["size"]
@@ -325,7 +415,7 @@ class LocalEncoder(nn.Module):
             self._tome_info["token_counts_local"].append(x_merge.shape[1])
 
         x_out = self.vit.norm(x_merge)
-        self._tome_info["source_matrix"] = source_matrix
+        self._finalize_trace_for_forward(source_matrix)
         return x_out, x_embed, self._tome_info["size"], self._tome_info
 
 
@@ -437,6 +527,9 @@ class HybridToMeModel(nn.Module):
                  metric_grad_scale: float = 0.1,
                  soft_topk: bool = False,
                  soft_topk_aux_weight: float = 0.3,
+                 local_depth: int = None,
+                 latent_depth: int = None,
+                 source_trace_mode: str = "center",
                  **kwargs):
         super().__init__()
 
@@ -445,10 +538,18 @@ class HybridToMeModel(nn.Module):
             arch = arch.lower()
             assert arch in set(self.arch_zoo), \
                 f'Arch {arch} is not in default archs {set(self.arch_zoo)}'
-            self.arch_settings = self.arch_zoo[arch]
+            self.arch_settings = dict(self.arch_zoo[arch])
             self.arch = arch.split("-")[0]
         else:
             raise ValueError("Wrong setups.")
+        if local_depth is not None:
+            self.arch_settings['local_depth'] = int(local_depth)
+        if latent_depth is not None:
+            self.arch_settings['latent_depth'] = int(latent_depth)
+        if self.arch_settings['local_depth'] <= 0:
+            raise ValueError("local_depth must be >= 1")
+        if self.arch_settings['latent_depth'] < 0:
+            raise ValueError("latent_depth must be >= 0")
         
         self.img_size = img_size
         self.patch_size = patch_size
@@ -477,6 +578,9 @@ class HybridToMeModel(nn.Module):
         self.soft_topk = soft_topk
         self.soft_topk_aux_weight = soft_topk_aux_weight
         self.metric_grad_scale = metric_grad_scale
+        if source_trace_mode not in ("matrix", "detached", "center", "none"):
+            raise ValueError("source_trace_mode must be one of: matrix, detached, center, none")
+        self.source_trace_mode = source_trace_mode
 
         # ------ Linear ------ #
         self.num_classes = num_classes
@@ -499,6 +603,7 @@ class HybridToMeModel(nn.Module):
             swa_size=swa_size,
             local_block_window=self.local_block_window,
             metric_grad_scale=self.metric_grad_scale,
+            source_trace_mode=self.source_trace_mode,
         )
         self.latent = LatentEncoder(self.img_size, self.patch_size, self.embed_dim, self.num_heads, self.mlp_ratio,
                                     depth = self.latent_depth, drop_rate=drop_rate, attn_drop_rate=attn_drop_rate, drop_path_rate=drop_path_rate,
@@ -671,7 +776,26 @@ class HybridToMeModel(nn.Module):
                             use_naive_local=tome_use_naive_local, r=tome_r_per_layer
                         )
             self.latent.vit._tome_info["total_merge"] = total_merge_latent
-    
+
+    def set_compression_lambda(self, lambda_local: float):
+        """Update the effective local compression ratio in-place (curriculum training).
+
+        total_merge_local and the local encoder's merge budget are recomputed so the
+        next forward pass merges/keeps tokens according to the new lambda. Safe to
+        call between epochs; also call on EMA copies since ``_tome_info`` lives on
+        the module instance and is not part of ``state_dict``.
+        """
+        lambda_local = float(lambda_local)
+        if lambda_local < 1.0:
+            raise ValueError(f"lambda_local must be >= 1.0, got {lambda_local}")
+        num_patches = (self.img_size // self.patch_size) ** 2
+        total_merge_local = int(num_patches * (lambda_local - 1) / lambda_local)
+        self.lambda_local = lambda_local
+        self.total_merge_local = total_merge_local
+        if hasattr(self.local, "_tome_info"):
+            self.local._tome_info["total_merge"] = total_merge_local
+        self.local.default_r = total_merge_local // max(self.local.local_depth, 1)
+        return total_merge_local
 
     def forward_ori(self,x):
         x = self.local.forward(x)
@@ -680,6 +804,56 @@ class HybridToMeModel(nn.Module):
         logits = self.head(cls_token_repr)
         aux = {}
         return logits, aux
+
+    @staticmethod
+    def _resolve_token_center_of_mass(info_local, x_local, size_local, source_matrix, device, batch_size):
+        token_center = info_local.get("token_center", None)
+        if token_center is not None:
+            center_of_mass = token_center.to(device=device, dtype=torch.float32)
+        elif source_matrix is not None:
+            with torch.no_grad():
+                center = info_local["source_matrix_center"]
+                width = info_local["source_matrix_width"]
+                B_sm, N_sm = source_matrix.shape[0], source_matrix.shape[1]
+                i_positions = torch.arange(N_sm, device=device).unsqueeze(0).expand(B_sm, -1)
+                offset_relative = torch.arange(width, device=device, dtype=torch.float32) - center
+                weighted_offset = (source_matrix.float() * offset_relative.view(1, 1, -1)).sum(dim=-1)
+                denom = size_local[..., 0].detach().float().clamp(min=1e-6)
+                center_of_mass = i_positions.float() + weighted_offset / denom
+        else:
+            N_tokens = x_local.shape[1]
+            center_of_mass = torch.arange(N_tokens, device=device, dtype=torch.float32).unsqueeze(0).expand(batch_size, -1)
+
+        info_local["token_center_of_mass"] = center_of_mass
+        return center_of_mass
+
+    @staticmethod
+    def _build_source_attention_bias(source_matrix, info_local, topk_in_full, batch_size, k, L_full, device):
+        if source_matrix is None:
+            return None
+
+        with torch.no_grad():
+            center = info_local["source_matrix_center"]
+            width = info_local["source_matrix_width"]
+            bias = torch.full((batch_size, k + 1, L_full), -1e4, device=device, dtype=torch.float32)
+            bias[:, 0, :] = 0.0
+
+            source_for_topk = torch.gather(
+                source_matrix, 1,
+                topk_in_full.unsqueeze(-1).expand(-1, -1, width)
+            ).float()
+            offset_range = torch.arange(width, device=device).view(1, 1, -1)
+            j_positions = topk_in_full.unsqueeze(-1) + (offset_range - center)
+            valid_mask = (j_positions >= 0) & (j_positions < L_full)
+            log_source = torch.where(
+                source_for_topk > 1e-10,
+                torch.log(source_for_topk.clamp(min=1e-10)),
+                torch.full_like(source_for_topk, -1e4)
+            )
+            log_source_masked = torch.where(valid_mask, log_source, torch.full_like(log_source, -1e4))
+            j_positions_safe = torch.where(valid_mask, j_positions, torch.zeros_like(j_positions))
+            bias[:, 1:, :].scatter_(2, j_positions_safe, log_source_masked)
+            return bias
 
 
     def forward(self, x):
@@ -691,22 +865,14 @@ class HybridToMeModel(nn.Module):
         # 阶段1：LocalEncoder（DTEM软合并 + 踪迹）
         x_local, x_embed, size_local, info_local = self.local(x)
         source_matrix = info_local.get("source_matrix", None) # [B, N, width], width = 2 * window_size * local_depth + 1
-        
-        if source_matrix is not None:
-            with torch.no_grad():
-                center = info_local["source_matrix_center"]
-                width = info_local["source_matrix_width"]
-                B_sm, N_sm = source_matrix.shape[0], source_matrix.shape[1]
-                i_positions = torch.arange(N_sm, device=device).unsqueeze(0).expand(B_sm, -1)  # (B, N)
-                offset_relative = torch.arange(width, device=device, dtype=torch.float32) - center  # (width,)
-                weighted_offset = (source_matrix * offset_relative.view(1, 1, -1)).sum(dim=-1)  # (B, N)
-                token_center_of_mass = i_positions.float() + weighted_offset / size_local[..., 0].detach().clamp(min=1e-6)
-            info_local["token_center_of_mass"] = token_center_of_mass  # (B, N)
-        else:
-            N_tokens = x_local.shape[1]
-            info_local["token_center_of_mass"] = torch.arange(N_tokens, device=device).float().unsqueeze(0).expand(B, -1)
+        if self.source_trace_mode in ("center", "none") and source_matrix is not None:
+            raise RuntimeError(
+                f"source_matrix is non-empty under source_trace_mode={self.source_trace_mode!r}."
+            )
 
-        center_of_mass = info_local["token_center_of_mass"] # [B, N]
+        center_of_mass = self._resolve_token_center_of_mass(
+            info_local, x_local, size_local, source_matrix, device, B
+        )
         k = L_full - info_local["total_merge"] - 1
         token_strength = size_local[..., 0] 
         token_strength_no_cls = token_strength[:,1:]  # 去掉CLS token
@@ -727,31 +893,9 @@ class HybridToMeModel(nn.Module):
         topk_size = torch.cat([size_local[:, :1, 0], topk_size_trace.squeeze(-1)], dim=-1).unsqueeze(-1)
 
         size_trace = topk_size
-        
-        if source_matrix is not None:
-            with torch.no_grad():
-                center = info_local["source_matrix_center"]
-                width = info_local["source_matrix_width"]
-                bias = torch.full((B, k+1, L_full), -1e4, device=device, dtype=x_local.dtype)
-                bias[:, 0, :] = 0.0
-                actual_indices = topk_in_full
-                source_for_topk = torch.gather(
-                    source_matrix, 1,
-                    actual_indices.unsqueeze(-1).expand(-1, -1, width)
-                )
-                offset_range = torch.arange(width, device=device).view(1, 1, -1)
-                j_positions = actual_indices.unsqueeze(-1) + (offset_range - center)
-                valid_mask = (j_positions >= 0) & (j_positions < L_full)
-                log_source = torch.where(
-                    source_for_topk > 1e-10,
-                    torch.log(source_for_topk.clamp(min=1e-10)),
-                    torch.full_like(source_for_topk, -1e4)
-                )  # [B, k, width]
-                log_source_masked = torch.where(valid_mask, log_source, torch.full_like(log_source, -1e4))
-                j_positions_safe = torch.where(valid_mask, j_positions, torch.zeros_like(j_positions))
-                bias[:, 1:, :].scatter_(2, j_positions_safe, log_source_masked)
-        else:
-            bias = torch.zeros((B, k+1, L_full), device=device, dtype=x_local.dtype)
+        bias = self._build_source_attention_bias(
+            source_matrix, info_local, topk_in_full, B, k, L_full, device
+        )
 
         x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias) + topk_x
 
@@ -786,22 +930,14 @@ class CLSHybridToMeModel(HybridToMeModel):
 
         x_local, x_embed, size_local, info_local = self.local(x)
         source_matrix = info_local.get("source_matrix", None) # [B, N, width], width = 2 * window_size * local_depth + 1
+        if self.source_trace_mode in ("center", "none") and source_matrix is not None:
+            raise RuntimeError(
+                f"source_matrix is non-empty under source_trace_mode={self.source_trace_mode!r}."
+            )
 
-        if source_matrix is not None:
-            with torch.no_grad():
-                center = info_local["source_matrix_center"]
-                width = info_local["source_matrix_width"]
-                B_sm, N_sm = source_matrix.shape[0], source_matrix.shape[1]
-                i_positions = torch.arange(N_sm, device=device).unsqueeze(0).expand(B_sm, -1)  # (B, N)
-                offset_relative = torch.arange(width, device=device, dtype=torch.float32) - center  # (width,)
-                weighted_offset = (source_matrix * offset_relative.view(1, 1, -1)).sum(dim=-1)  # (B, N)
-                token_center_of_mass = i_positions.float() + weighted_offset / size_local[..., 0].detach().clamp(min=1e-6)
-            info_local["token_center_of_mass"] = token_center_of_mass  # (B, N)
-        else:
-            N_tokens = x_local.shape[1]
-            info_local["token_center_of_mass"] = torch.arange(N_tokens, device=device).float().unsqueeze(0).expand(B, -1)
-
-        center_of_mass = info_local["token_center_of_mass"] # [B, N]
+        center_of_mass = self._resolve_token_center_of_mass(
+            info_local, x_local, size_local, source_matrix, device, B
+        )
         k = L_full - info_local["total_merge"] - 1
         token_strength = size_local[..., 0]
         token_strength_no_cls = token_strength[:,1:]
@@ -831,35 +967,9 @@ class CLSHybridToMeModel(HybridToMeModel):
         topk_size = torch.cat([size_local[:, :1, 0], topk_size_trace.squeeze(-1)], dim=-1).unsqueeze(-1)
 
         size_trace = topk_size
-        if source_matrix is not None:
-            with torch.no_grad():
-                # FP32-safe: bias 涉及 log(small) 与 -1e4 的 mask 值，在 fp16 下精度只有 ~1，
-                # 且 clamp(min=1e-10) 在 fp16 下下溢成 0 → log(0)=-inf。统一在 fp32 中算。
-                center = info_local["source_matrix_center"]
-                width = info_local["source_matrix_width"]
-                bias = torch.full((B, k+1, L_full), -1e4, device=device, dtype=torch.float32)
-                bias[:, 0, :] = 0.0
-                actual_indices = topk_in_full
-
-                source_for_topk = torch.gather(
-                    source_matrix, 1,
-                    actual_indices.unsqueeze(-1).expand(-1, -1, width)
-                ).float()  # 强制 fp32，避免 fp16 下的 underflow
-                offset_range = torch.arange(width, device=device).view(1, 1, -1)
-                j_positions = actual_indices.unsqueeze(-1) + (offset_range - center)
-                valid_mask = (j_positions >= 0) & (j_positions < L_full)
-                log_source = torch.where(
-                    source_for_topk > 1e-10,
-                    torch.log(source_for_topk.clamp(min=1e-10)),
-                    torch.full_like(source_for_topk, -1e4)
-                )
-                log_source_masked = torch.where(valid_mask, log_source, torch.full_like(log_source, -1e4))
-                j_positions_safe = torch.where(valid_mask, j_positions, torch.zeros_like(j_positions))
-                bias[:, 1:, :].scatter_(2, j_positions_safe, log_source_masked)
-                # bias 维持 fp32；MyCrossAttention.forward 内部做 fp32-safe softmax。
-                # 加 attn_scores 时 fp16 + fp32 自动 upcast 为 fp32（PyTorch 行为），无类型错误。
-        else:
-            bias = torch.zeros((B, k+1, L_full), device=device, dtype=torch.float32)
+        bias = self._build_source_attention_bias(
+            source_matrix, info_local, topk_in_full, B, k, L_full, device
+        )
 
         x_trace = self.encode_cross_attention(topk_x, x_embed, mask=bias) + topk_x
 
@@ -868,7 +978,7 @@ class CLSHybridToMeModel(HybridToMeModel):
         cls_token_repr = x_latent[:, 0]
         main_logits = self.head(cls_token_repr)
 
-        if soft_sel is not None and self.training:
+        if soft_sel is not None and self.training and self.soft_topk_aux_weight > 0:
             soft_w_norm = soft_sel / soft_sel.sum(dim=1, keepdim=True).clamp(min=1e-6)
             aux_repr = (x_local[:, 1:] * soft_w_norm.unsqueeze(-1)).sum(dim=1)
             aux_logits = self.head(aux_repr)
@@ -876,7 +986,20 @@ class CLSHybridToMeModel(HybridToMeModel):
         else:
             logits = main_logits
 
-        aux = {"token_counts_local": info_local.get("token_counts_local", None)}
+        aux = {
+            "token_counts_local": info_local.get("token_counts_local", None),
+            # Routing/feature distillation hooks (see in1k_trainer.py):
+            # - token_strength_no_cls: differentiable DTEM size mass per original
+            #   patch position (soft merge keeps all tokens in spatial order), so
+            #   index i aligns with teacher patch i on the same grid.
+            # - topk_patch_indices: 0-based original-patch indices selected into
+            #   the latent encoder (sorted by center of mass).
+            "token_strength_no_cls": token_strength_no_cls,
+            "topk_patch_indices": sorted_topk_indices,
+            "retained_tokens": int(k),
+            "cls_feature": cls_token_repr,
+            "latent_tokens": x_latent[:, 1:],
+        }
         return logits, aux
 
 
@@ -894,8 +1017,8 @@ class CLSDualBranchHybridToMeModel(nn.Module):
         patch_size=16,
         num_classes=1000,
         fusion_type='cat_linear',
-        branch_b_lambda_local=4.0,
-        branch_b_total_merge_latent=0,
+        branch_b_lambda_local=None,
+        branch_b_total_merge_latent=None,
         branch_b_dtem_window_size=None,
         branch_b_use_softkmax=None,
         branch_b_swa_size=None,
@@ -911,9 +1034,11 @@ class CLSDualBranchHybridToMeModel(nn.Module):
         kw_a['lambda_local'] = 1.0
         kw_a['total_merge_latent'] = 0
 
-        kw_b = dict(common_kwargs)
-        kw_b['lambda_local'] = float(branch_b_lambda_local)
-        kw_b['total_merge_latent'] = int(branch_b_total_merge_latent)
+        kw_b = _with_mergenet_branch_b_defaults(common_kwargs)
+        if branch_b_lambda_local is not None:
+            kw_b['lambda_local'] = float(branch_b_lambda_local)
+        if branch_b_total_merge_latent is not None:
+            kw_b['total_merge_latent'] = int(branch_b_total_merge_latent)
         # Branch-B specific overrides only when explicitly provided.
         if branch_b_dtem_window_size is not None:
             kw_b['dtem_window_size'] = branch_b_dtem_window_size
@@ -1092,7 +1217,7 @@ class CLSDualBranchHybridToMeModel(nn.Module):
                 - ``'keep'`` / ``None``：不动 fusion_head，沿用当前状态（用于
                   resume 等更复杂场景）。
         """
-        raw = torch.load(path, map_location=map_location)
+        raw = _torch_load_checkpoint(path, map_location=map_location)
         if isinstance(raw, dict) and 'state_dict' in raw:
             sd = raw['state_dict']
         elif isinstance(raw, dict) and 'model' in raw:
@@ -1238,10 +1363,17 @@ def hybridtomevit_base_cls(**kwargs):
     return model
 
 @register_model
-def hybridtomevit_small_cls(**kwargs):
-    """HybridToMe ViT Small model"""
+def mergenet_small_cls(**kwargs):
+    """Canonical single-branch MergeNet-B classifier."""
+    kwargs = _with_mergenet_small_defaults(kwargs)
     model = CLSHybridToMeModel(arch='small', remove_decoder_cross_attention=True, **kwargs)
     return model
+
+
+@register_model
+def hybridtomevit_small_cls(**kwargs):
+    """Compatibility alias for ``mergenet_small_cls``."""
+    return mergenet_small_cls(**kwargs)
 
 
 @register_model
@@ -1274,12 +1406,12 @@ def hybridtomevit_small_cls_branch_a(pretrained=False, num_classes=1000, **kwarg
 
 
 @register_model
-def hybridtomevit_small_cls_dual_ab(pretrained=False, num_classes=1000, **kwargs):
-    """P1 第二步：双分支 A（无降采样）+ B（压缩）+ 融合；训练策略由 ``in1k_trainer`` 的 ``--dual_branch_train_mode`` 控制。"""
+def mergenet_small_cls_dual_ab(pretrained=False, num_classes=1000, **kwargs):
+    """Dual container: branch A anchor + canonical ``mergenet_small_cls`` branch B + fusion."""
     kwargs = dict(kwargs)
     fusion_type = kwargs.pop('fusion_type', 'cat_linear')
-    branch_b_lambda_local = float(kwargs.pop('branch_b_lambda_local', 4.0))
-    branch_b_total_merge_latent = int(kwargs.pop('branch_b_total_merge_latent', 0))
+    branch_b_lambda_local = kwargs.pop('branch_b_lambda_local', None)
+    branch_b_total_merge_latent = kwargs.pop('branch_b_total_merge_latent', None)
     branch_b_dtem_window_size = kwargs.pop('branch_b_dtem_window_size', None)
     branch_b_use_softkmax = kwargs.pop('branch_b_use_softkmax', None)
     branch_b_swa_size = kwargs.pop('branch_b_swa_size', None)
@@ -1300,6 +1432,12 @@ def hybridtomevit_small_cls_dual_ab(pretrained=False, num_classes=1000, **kwargs
 
 
 @register_model
+def hybridtomevit_small_cls_dual_ab(pretrained=False, num_classes=1000, **kwargs):
+    """Compatibility alias for ``mergenet_small_cls_dual_ab``."""
+    return mergenet_small_cls_dual_ab(pretrained=pretrained, num_classes=num_classes, **kwargs)
+
+
+@register_model
 def hybridtomevit_small_cls_ext(**kwargs):
     """HybridToMe ViT Small model"""
     model = CLSHybridToMeModel(arch='s_ext', remove_decoder_cross_attention=True, **kwargs)
@@ -1310,14 +1448,14 @@ def hybridtomevit_small_cls_ext(**kwargs):
 
 
 if __name__ == '__main__':
-    """ Debug script for hybridtomevit_small_cls model during development """
+    """ Debug script for mergenet_small_cls model during development """
     from timm.models import create_model
     # Create model instance (using default parameters similar to trainer)
     print("=" * 60)
-    print("Creating hybridtomevit_small_cls model...")
+    print("Creating mergenet_small_cls model...")
     
     model = create_model(
-        'hybridtomevit_small_cls',  # model_name must be the first positional argument
+        'mergenet_small_cls',  # model_name must be the first positional argument
         pretrained=False,
         num_classes=1000,
         img_size=224,

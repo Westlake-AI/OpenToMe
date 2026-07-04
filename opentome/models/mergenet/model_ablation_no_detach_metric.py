@@ -47,6 +47,7 @@ class LocalEncoderNoDetach(LocalEncoder):
         )
         self._tome_info["r"] = r_list
         self._tome_info["size"] = torch.ones_like(x[..., 0:1])
+        self._prepare_trace_for_forward()
         self._tome_info["token_counts_local"] = []
 
         size = self._tome_info["size"]
@@ -66,7 +67,7 @@ class LocalEncoderNoDetach(LocalEncoder):
             self._tome_info["token_counts_local"].append(x_merge.shape[1])
 
         x_out = self.vit.norm(x_merge)
-        self._tome_info["source_matrix"] = source_matrix
+        self._finalize_trace_for_forward(source_matrix)
         return x_out, x_embed, self._tome_info["size"], self._tome_info
 
 
@@ -98,6 +99,7 @@ class AblationNoDetachMetricModel(CLSHybridToMeModel):
             use_softkmax=self.use_softkmax,
             swa_size=self.swa_size,
             local_block_window=self.local_block_window,
+            source_trace_mode=self.source_trace_mode,
         )
         # 复制已加载的权重
         self.local.load_state_dict(old_local.state_dict(), strict=False)
