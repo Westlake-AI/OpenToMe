@@ -125,6 +125,13 @@ if [[ "${KD}" == "1" && "${DRY_RUN}" != "1" ]]; then
   [[ -f "${TEACHER_CKPT}" ]] || { echo "[FATAL] TEACHER_CKPT not found: ${TEACHER_CKPT}" >&2; exit 2; }
 fi
 
+# --- routing schedule ---------------------------------------------------------
+# ROUTING_AFTER_CURRICULUM=1 delays routing KD until lambda ramp finishes (patch
+# grid alignment is cleaner once compression target is nearly reached).
+if [[ "${ROUTING_AFTER_CURRICULUM:-0}" == "1" ]]; then
+  ROUTING_START_EPOCH="${ROUTING_START_EPOCH:-$((LAMBDA_RAMP_START_EPOCH + LAMBDA_RAMP_EPOCHS))}"
+fi
+
 # --- experiment name -----------------------------------------------------------
 if [[ -z "${EXP:-}" ]]; then
   if [[ "${MODEL_KIND}" == "deit" ]]; then
@@ -134,6 +141,14 @@ if [[ -z "${EXP:-}" ]]; then
     [[ "${KD}" == "1" ]] && EXP="${EXP}_kd"
     [[ "${CURRICULUM}" == "1" ]] && EXP="${EXP}_cur"
     [[ "${SOFT_TOPK}" == "1" ]] && EXP="${EXP}_stk"
+    if [[ "${MN_LAMBDA_LOCAL}" != "4.0" ]]; then
+      lam_tag=$(echo "${MN_LAMBDA_LOCAL}" | tr '.' 'p')
+      EXP="${EXP}_lam${lam_tag}"
+    fi
+    if [[ "${CURRICULUM}" == "1" && "${LAMBDA_RAMP_EPOCHS}" != "50" ]]; then
+      EXP="${EXP}_r${LAMBDA_RAMP_EPOCHS}"
+    fi
+    [[ -n "${EXP_SUFFIX:-}" ]] && EXP="${EXP}_${EXP_SUFFIX}"
   fi
 fi
 

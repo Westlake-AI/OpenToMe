@@ -61,10 +61,14 @@ def shorten(label: str) -> str:
     return label.replace("c100_scratch200_", "").replace("_p8_b200", "")
 
 
-def plot_metric(series, ylabel, title, out_path: Path, annotate_best=False):
+def plot_metric(series, ylabel, title, out_path: Path, annotate_best=False,
+                baseline=None, baseline_label="baseline"):
     if not series:
         return None
     plt.figure(figsize=(8.5, 5), dpi=150)
+    if baseline is not None:
+        plt.axhline(baseline, color="gray", linestyle=":", linewidth=1.2,
+                    label=f"{baseline_label} ({baseline:.2f})")
     for label, epochs, values in series:
         (line,) = plt.plot(epochs, values, linewidth=1.7, label=shorten(label))
         if annotate_best and len(values):
@@ -130,6 +134,10 @@ def main():
                         help="Directory containing experiment folders.")
     parser.add_argument("--glob", default="c100_scratch*",
                         help="Glob pattern for auto-discovering experiments.")
+    parser.add_argument("--baseline", type=float, default=None,
+                        help="Draw horizontal baseline line on accuracy plot (e.g. 67.18).")
+    parser.add_argument("--baseline-label", default="deit baseline",
+                        help="Legend label for --baseline.")
     parser.add_argument("--model", action="append", default=[],
                         help="Extra/override runs: /path/summary.csv:label (repeatable).")
     parser.add_argument("--output-dir",
@@ -161,7 +169,9 @@ def main():
         ("train_loss", "train loss", "Train Loss vs Epoch", "train_loss.png", False),
     ]:
         path = plot_metric(series_for(models, column), ylabel, title, out / fname,
-                           annotate_best=annotate)
+                           annotate_best=annotate,
+                           baseline=args.baseline if column == "eval_top1" else None,
+                           baseline_label=args.baseline_label)
         if path:
             written.append(path)
 
