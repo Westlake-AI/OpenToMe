@@ -314,7 +314,7 @@ def biased_local_attention(
             ) from e_secondary
     
     # 自动检测输入格式：(B, N, H, D) vs (B, H, N, D)
-    # flash-attn 期望 (B, H, N, D) 或通过 transpose 转换
+    # flash-attn 期望 (B, N, H, D)，调用前统一转换为该格式。
     assert q.ndim == 4, f"q must be 4D, got shape {q.shape}"
     
     # 判断格式：如果第二个维度远大于第三个维度，则认为是 (B, N, H, D)
@@ -353,9 +353,9 @@ def biased_local_attention(
     if bias.dtype != k.dtype:
         bias = bias.to(k.dtype)
     
-    # 确保输入格式为 (B, H, N, D) 以匹配 flash-attn
-    if input_format == "BNHD":
-        # (B, N, H, D) -> (B, H, N, D)
+    # flash_attn_func expects (B, N, H, D).
+    if input_format == "BHND":
+        # (B, H, N, D) -> (B, N, H, D)
         q = q.transpose(1, 2).contiguous()
         k = k.transpose(1, 2).contiguous()
         v = v.transpose(1, 2).contiguous()
@@ -370,10 +370,10 @@ def biased_local_attention(
         v = v.clone() if not v.is_contiguous() else v
         
         # 在第 D_logic 列写入 bias
-        # 此时 q,k 形状: (B, H, N, D)
+        # 此时 q,k 形状: (B, N, H, D)
         q[..., D_logic] = math.sqrt(D_logic)
-        # 🔧 FIX: bias (B, N) → (B, 1, N) 才能 broadcast 到 (B, H, N)
-        k[..., D_logic] = bias.unsqueeze(1).to(k.dtype)
+        # bias (B, N) -> (B, N, 1)，broadcast 到所有 attention heads。
+        k[..., D_logic] = bias.unsqueeze(-1).to(k.dtype)
         
         # 其余列置零
         if D > D_logic + 1:
@@ -397,7 +397,7 @@ def biased_local_attention(
         out = out_ext[..., :D_logic]
         
         # 恢复原始格式
-        if input_format == "BNHD":
+        if input_format == "BHND":
             out = out.transpose(1, 2).contiguous()
         
         return out.to(output_dtype)
@@ -408,30 +408,30 @@ def biased_local_attention(
     D_ext = D_logic + 1  # 逻辑上需要扩展一列
     D_phys = ((D_ext + 7) // 8) * 8  # 向上对齐到 8 的倍数
     
-    # 🔧 FIX: 此时 q,k,v 已经统一为 (B, H, N, D) 格式（经过 line 357-361 处理）
-    # 创建对齐后的 buffer，使用 (B, H, N, D_phys) 顺序
+    # 此时 q,k,v 已经统一为 flash-attn 的 (B, N, H, D) 格式。
+    # 创建对齐后的 buffer，使用 (B, N, H, D_phys) 顺序
     # 
     # 注意：训练时不使用缓存，因为 Flash Attention 会保存输入用于 backward，
     # 缓存会导致多个 iteration 共享同一块内存，产生 "modified by inplace" 错误。
     # 推理时可以使用缓存，因为不需要梯度。
     if training:
         # 训练模式：每次创建新 tensor
-        q_phys = torch.zeros((B, H, N, D_phys), device=q.device, dtype=q.dtype)
-        k_phys = torch.zeros((B, H, N, D_phys), device=k.device, dtype=k.dtype)
-        v_phys = torch.zeros((B, H, N, D_phys), device=v.device, dtype=v.dtype)
+        q_phys = torch.zeros((B, N, H, D_phys), device=q.device, dtype=q.dtype)
+        k_phys = torch.zeros((B, N, H, D_phys), device=k.device, dtype=k.dtype)
+        v_phys = torch.zeros((B, N, H, D_phys), device=v.device, dtype=v.dtype)
     else:
         # 推理模式：使用缓存优化
-        key = (q.device, q.dtype, B, H, N, D_phys)
+        key = (q.device, q.dtype, B, N, H, D_phys)
         q_phys = _get_cached_buffer(
-                _flash_pad_cache, ('q',) + key, (B, H, N, D_phys),
+                _flash_pad_cache, ('q',) + key, (B, N, H, D_phys),
                 q.device, q.dtype, requires_grad=False
         )
         k_phys = _get_cached_buffer(
-                _flash_pad_cache, ('k',) + key, (B, H, N, D_phys),
+                _flash_pad_cache, ('k',) + key, (B, N, H, D_phys),
                 k.device, k.dtype, requires_grad=False
         )
         v_phys = _get_cached_buffer(
-                _flash_pad_cache, ('v',) + key, (B, H, N, D_phys),
+                _flash_pad_cache, ('v',) + key, (B, N, H, D_phys),
                 v.device, v.dtype, requires_grad=False
         )
     
@@ -440,10 +440,10 @@ def biased_local_attention(
     k_phys[..., :D] = k
     
     # 在第 D_logic 列填充 bias（这是关键！）
-    # q_phys, k_phys 形状: (B, H, N, D_phys)
+    # q_phys, k_phys 形状: (B, N, H, D_phys)
     q_phys[..., D_logic] = math.sqrt(D_logic)
-    # 🔧 FIX: bias (B, N) → (B, 1, N) 才能 broadcast 到 (B, H, N)
-    k_phys[..., D_logic] = bias.unsqueeze(1).to(k.dtype)
+    # bias (B, N) -> (B, N, 1)，broadcast 到所有 attention heads。
+    k_phys[..., D_logic] = bias.unsqueeze(-1).to(k.dtype)
     
     # 其余 padding 列置零（欺骗 flash-attn，让它走快速路径）
     if D_phys > D_ext:
@@ -462,14 +462,14 @@ def biased_local_attention(
         causal=False,
         window_size=(local_window, local_window),
         deterministic=not training,
-    )  # (B, H, N, D_phys)
+    )  # (B, N, H, D_phys)
     
     # 只返回逻辑维度的前 D 列（丢弃 padding）
     out = out_ext[..., :D]
     
     # 恢复原始格式
-    if input_format == "BNHD":
-        out = out.transpose(1, 2).contiguous()  # (B, H, N, D) -> (B, N, H, D)
+    if input_format == "BHND":
+        out = out.transpose(1, 2).contiguous()  # (B, N, H, D) -> (B, H, N, D)
     
     return out.to(output_dtype)
 
@@ -538,8 +538,9 @@ def unbiased_local_attention(
         k = k.to(target_dtype)
         v = v.to(target_dtype)
     
-    # 确保输入格式为 (B, H, N, D)
-    if input_format == "BNHD":
+    # flash_attn_func expects (B, N, H, D). LocalAttention produces BHND,
+    # so transpose that path before entering the kernel.
+    if input_format == "BHND":
         q = q.transpose(1, 2).contiguous()
         k = k.transpose(1, 2).contiguous()
         v = v.transpose(1, 2).contiguous()
@@ -556,7 +557,7 @@ def unbiased_local_attention(
         )
         
         # 恢复原始格式
-        if input_format == "BNHD":
+        if input_format == "BHND":
             out = out.transpose(1, 2).contiguous()
         
         return out.to(output_dtype)
@@ -564,27 +565,27 @@ def unbiased_local_attention(
     # 非对齐场景：物理对齐到 8 的倍数
     D_phys = ((D + 7) // 8) * 8
     
-    # 🔧 FIX: 此时 q,k,v 已经是 (B, H, N, D) 格式（经过 line 548-551 处理）
+    # q/k/v are now in flash-attn's (B, N, H, D) layout.
     # 注意：训练时不使用缓存，因为 Flash Attention 会保存输入用于 backward，
     # 缓存会导致多个 iteration 共享同一块内存，产生 "modified by inplace" 错误。
     if training:
         # 训练模式：每次创建新 tensor
-        q_phys = torch.zeros((B, H, N, D_phys), device=q.device, dtype=q.dtype)
-        k_phys = torch.zeros((B, H, N, D_phys), device=k.device, dtype=k.dtype)
-        v_phys = torch.zeros((B, H, N, D_phys), device=v.device, dtype=v.dtype)
+        q_phys = torch.zeros((B, N, H, D_phys), device=q.device, dtype=q.dtype)
+        k_phys = torch.zeros((B, N, H, D_phys), device=k.device, dtype=k.dtype)
+        v_phys = torch.zeros((B, N, H, D_phys), device=v.device, dtype=v.dtype)
     else:
         # 推理模式：使用缓存优化
-        key = (q.device, q.dtype, B, H, N, D_phys)
+        key = (q.device, q.dtype, B, N, H, D_phys)
         q_phys = _get_cached_buffer(
-            _flash_pad_cache, ('q_ub',) + key, (B, H, N, D_phys),
+            _flash_pad_cache, ('q_ub',) + key, (B, N, H, D_phys),
             q.device, q.dtype, requires_grad=False
         )
         k_phys = _get_cached_buffer(
-            _flash_pad_cache, ('k_ub',) + key, (B, H, N, D_phys),
+            _flash_pad_cache, ('k_ub',) + key, (B, N, H, D_phys),
             k.device, k.dtype, requires_grad=False
         )
         v_phys = _get_cached_buffer(
-            _flash_pad_cache, ('v_ub',) + key, (B, H, N, D_phys),
+            _flash_pad_cache, ('v_ub',) + key, (B, N, H, D_phys),
             v.device, v.dtype, requires_grad=False
         )
     
@@ -608,7 +609,7 @@ def unbiased_local_attention(
     out = out_ext[..., :D]
     
     # 恢复原始格式
-    if input_format == "BNHD":
+    if input_format == "BHND":
         out = out.transpose(1, 2).contiguous()
     
     return out.to(output_dtype)
