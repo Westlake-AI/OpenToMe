@@ -2,7 +2,10 @@
 
 set -euo pipefail
 
-params=("$@")
+params=""
+if [ $# -ne 0 ]; then
+    params="$*"
+fi
 
 # use envs as local params for convenience
 # e.g.
@@ -60,19 +63,14 @@ NNODE=1 NGPU=8 LOG_RANK=0 bash train.sh \
 echo "Launching training..."
 
 set -x
-# 从数组中精确提取各参数值（支持含特殊字符的值）
-for i in "${!params[@]}"; do
-    case "${params[$i]}" in
-        --job.dump_folder)      path="${params[$((i+1))]}" ;;
-        --training.steps)       steps="${params[$((i+1))]}" ;;
-        --model.config)         config="${params[$((i+1))]}" ;;
-        --model.tokenizer_path) tokenizer="${params[$((i+1))]}" ;;
-    esac
-done
+path=$(grep -oP '(?<=--job.dump_folder )[^ ]+' <<< "$params")
+steps=$(grep -oP '(?<=--training.steps )[^ ]+' <<< "$params")
+config=$(grep -oP '(?<=--model.config )[^ ]+' <<< "$params")
+tokenizer=$(grep -oP '(?<=--model.tokenizer_path )[^ ]+' <<< "$params")
 
 # Register all local model types once so AutoConfig can resolve custom model_type.
 model=$(
-  python -c "import json, sys; print(json.load(open('$config'))['model_type'])" 2>/dev/null || echo "unknown"
+  python -c "import fla, sys; import opentome.models" "$config" | jq -r '.model_type'
 )
 
 mkdir -p $path
@@ -113,7 +111,7 @@ torchrun --nnodes=${NNODE} \
   --tee 3 \
   --log-dir $path/logs \
   -m flame.train \
-  "${params[@]}"
+  $params
 
 echo "TRAINING DONE!"
 echo "Converting the DCP checkpoints to HF format..."

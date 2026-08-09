@@ -5,17 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import json
-import math
 import os
 import time
-
-# Per-rank Triton/Inductor cache. Shared /tmp/triton_cache_* under DDP + torch.compile
-# races in torch._inductor (FileExistsError on os.replace); set before import torch.
-# _lr_triton = os.environ.get("LOCAL_RANK")
-# if _lr_triton is not None:
-#     _td = os.environ.get("TRITON_CACHE_DIR", "/tmp/triton_inductor")
-#     os.environ["TRITON_CACHE_DIR"] = f"{_td}_r{_lr_triton}"
-
 from datetime import timedelta
 
 import fla  # noqa
@@ -63,6 +54,9 @@ elif "qwen3_next" in backbone:
 elif "blt" in backbone:
     print("BLT")
     import opentome.models.blt
+elif "hnet" in backbone:
+    print("HNet")
+    import opentome.models.hnet
 elif "mergenet" in backbone:
     print("MergeNet")
     import opentome.models.mergenet_nlp
@@ -77,6 +71,7 @@ else:
     from opentome.utils.optimization import build_optimizers
 print(f"Tokenizer name: {tokenizer_name}")
 print(f"Optimizer: {default_opt}")
+# from ipdb import set_trace as point
 from opentome.tokenizer.build_tokenizer import TokenizerArgs
 print("*" * 50)
 # ------ End of jinxin added ------ #
@@ -90,195 +85,6 @@ from flame.tools.utils import get_nparams_and_flops
 
 def build_tokenizer(job_config: JobConfig) -> AutoTokenizer:
     return AutoTokenizer.from_pretrained(job_config.model.tokenizer_path)
-
-
-# ------ jinxin ------ #
-def build_val_chunks_cache(
-    val_data_path: str,
-    tokenizer,
-    seq_len: int,
-    world_mesh,
-    parallel_dims,
-    c4_target_eval_tokens: int = 10_000_000,
-) -> "list[list[int]]":
-    """
-    Load, tokenize, and chunk the validation set exactly once before training.
-    Returns a list of token-id chunks (each of length seq_len) for this dp rank.
-
-    - parquet (wiki_val): full set, sharded by dp_rank
-    - json.gz glob (C4): streaming, capped at c4_target_eval_tokens per rank
-    """
-    if parallel_dims.dp_enabled:
-        dp_degree = world_mesh["dp"].size()
-        dp_rank   = world_mesh["dp"].get_local_rank()
-    else:
-        dp_degree, dp_rank = 1, 0
-
-    is_c4 = not val_data_path.endswith(".parquet")
-
-    # 1. Load texts
-    if not is_c4:
-        import pandas as pd
-        df = pd.read_parquet(val_data_path)
-        texts = df["text"].tolist()[dp_rank::dp_degree]
-    else:
-        from datasets import load_dataset
-        ds = load_dataset("json", data_files=val_data_path, split="train", streaming=True)
-        texts = []
-        tok_est = 0
-        for idx, sample in enumerate(ds):
-            if idx % dp_degree != dp_rank:
-                continue
-            texts.append(sample["text"])
-            tok_est += len(sample["text"]) // 4  # ~4 chars per token
-            if c4_target_eval_tokens > 0 and tok_est >= c4_target_eval_tokens + seq_len:
-                break
-
-    # 2. Batched tokenization (512 texts per call)
-    token_buffer: list[int] = []
-    for i in range(0, len(texts), 512):
-        batch_ids = tokenizer(
-            texts[i : i + 512],
-            return_attention_mask=False,
-            add_special_tokens=False,
-        )["input_ids"]
-        for ids in batch_ids:
-            token_buffer.extend(ids)
-        if is_c4 and c4_target_eval_tokens > 0 and len(token_buffer) >= c4_target_eval_tokens + seq_len:
-            break
-
-    # 3. Cut into non-overlapping seq_len chunks
-    chunks = [
-        token_buffer[i : i + seq_len]
-        for i in range(0, len(token_buffer) - seq_len, seq_len)
-    ]
-    return chunks
-
-
-def evaluate_ppl(
-    model,
-    tokenizer,
-    val_data_path: str,
-    batch_size: int,
-    seq_len: int,
-    device,
-    device_type: str,  # kept for call-site compatibility, unused internally
-    world_mesh,
-    parallel_dims,
-    maybe_enable_amp,
-    color,
-    step: int,
-    chunks_cache: "list[list[int]] | None" = None,
-) -> float:
-    """
-    Evaluation function for PPL on validation set.
-
-    When chunks_cache is provided (pre-built in main before the train loop),
-    all IO and tokenization is skipped — only the forward pass runs.
-    This is the fast path used during training.
-
-    Without cache (chunks_cache=None), falls back to loading from disk:
-      - parquet (wiki_val): full set, no token budget
-      - json.gz glob (C4): streaming, 10M-token budget per rank
-    """
-    model.eval()
-
-    if parallel_dims.dp_enabled:
-        dp_mesh = world_mesh["dp"]
-        dp_degree = dp_mesh.size()
-        dp_rank = dp_mesh.get_local_rank()
-    else:
-        dp_degree, dp_rank = 1, 0
-
-    # ------------------------------------------------------------------ #
-    # 1. Get chunks — from cache (fast) or disk (slow, fallback only)     #
-    # ------------------------------------------------------------------ #
-    if chunks_cache is not None:
-        chunks = chunks_cache  # zero IO, zero tokenization
-    else:
-        # Fallback: load from disk (only used if cache was not built)
-        C4_TARGET_EVAL_TOKENS = 10_000_000
-        is_c4 = not val_data_path.endswith(".parquet")
-
-        if not is_c4:
-            import pandas as pd
-            df = pd.read_parquet(val_data_path)
-            texts_for_rank = df["text"].tolist()[dp_rank::dp_degree]
-        else:
-            from datasets import load_dataset
-            ds = load_dataset("json", data_files=val_data_path, split="train", streaming=True)
-            texts_for_rank = []
-            token_estimate = 0
-            for idx, sample in enumerate(ds):
-                if idx % dp_degree != dp_rank:
-                    continue
-                texts_for_rank.append(sample["text"])
-                token_estimate += len(sample["text"]) // 4
-                if C4_TARGET_EVAL_TOKENS > 0 and token_estimate >= C4_TARGET_EVAL_TOKENS + seq_len:
-                    break
-
-        TOKENIZE_BATCH = 512
-        token_buffer = []
-        for i in range(0, len(texts_for_rank), TOKENIZE_BATCH):
-            batch_ids = tokenizer(
-                texts_for_rank[i : i + TOKENIZE_BATCH],
-                return_attention_mask=False,
-                add_special_tokens=False,
-            )["input_ids"]
-            for ids in batch_ids:
-                token_buffer.extend(ids)
-            if is_c4 and C4_TARGET_EVAL_TOKENS > 0 and len(token_buffer) >= C4_TARGET_EVAL_TOKENS + seq_len:
-                break
-
-        chunks = [
-            token_buffer[i : i + seq_len]
-            for i in range(0, len(token_buffer) - seq_len, seq_len)
-        ]
-
-    # ------------------------------------------------------------------ #
-    # 2. Forward pass over all chunks                                     #
-    # ------------------------------------------------------------------ #
-    total_loss = torch.tensor(0.0, device=device)
-    total_tokens = torch.tensor(0, device=device, dtype=torch.long)
-
-    with torch.no_grad():
-        for i in range(0, len(chunks), batch_size):
-            batch_chunks = chunks[i : i + batch_size]
-            if not batch_chunks:
-                continue
-            input_ids = torch.tensor(batch_chunks, dtype=torch.long, device=device)
-            labels = input_ids.clone()
-            position_ids = (
-                torch.arange(0, input_ids.shape[1], device=device)
-                .repeat(input_ids.shape[0], 1)
-                .to(torch.int32)
-            )
-            with maybe_enable_amp:
-                output = model(
-                    input_ids=input_ids,
-                    labels=labels,
-                    position_ids=position_ids,
-                )
-            n_tokens = labels.numel()
-            total_loss += output.loss.detach() * n_tokens
-            total_tokens += n_tokens
-
-    # ------------------------------------------------------------------ #
-    # 3. All-reduce across dp ranks                                       #
-    # ------------------------------------------------------------------ #
-    if parallel_dims.dp_enabled:
-        torch.distributed.all_reduce(total_loss, group=world_mesh["dp"].get_group())
-        torch.distributed.all_reduce(total_tokens, group=world_mesh["dp"].get_group())
-
-    avg_loss = (
-        (total_loss / total_tokens).item()
-        if total_tokens.item() > 0
-        else float("inf")
-    )
-    ppl = math.exp(avg_loss)
-
-    model.train()
-    return ppl
 
 
 register_train_spec(
@@ -516,23 +322,14 @@ def main(job_config: JobConfig):
     )
 
     # build optimizer after applying parallelisms to the model
-    # SCALE / RMNP need precomputed parameter groups; Muon uses local opentome/optimizer/muon.py
-    # (param split inside Muon.__init__, not build_muon_metrics).
-    metric_model = model_parts[0]
-    if default_opt == "SCALE":
-        from opentome.utils.optimization import build_scale_metrics
-
-        metrics = build_scale_metrics(metric_model)
-        optimizers = train_spec.build_optimizers_fn(
-            model_parts, job_config, ft_manager, metrics=metrics
-        )
-    elif default_opt == "RMNP":
-        from opentome.utils.optimization import build_rmnp_metrics
-
-        metrics = build_rmnp_metrics(metric_model)
-        optimizers = train_spec.build_optimizers_fn(
-            model_parts, job_config, ft_manager, metrics=metrics
-        )
+    if default_opt == "Muon":
+        muon_params = [
+            p for name, p in model.named_parameters() if p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name
+        ]
+        adamw_params = [
+            p for name, p in model.named_parameters() if not (p.ndim >= 2 and "embed_tokens" not in name and "lm_head" not in name)
+        ]
+        optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager, muon_params, adamw_params)
     else:
         optimizers = train_spec.build_optimizers_fn(model_parts, job_config, ft_manager)
     lr_schedulers = train_spec.build_lr_schedulers_fn(optimizers, job_config)
@@ -643,56 +440,6 @@ def main(job_config: JobConfig):
         * job_config.training.gradient_accumulation_steps
     )
     num_tokens_per_step = global_batch_size * job_config.training.seq_len
-
-    # ------ jinxin ------ #
-    # PPL related configurations for validation
-    val_times = getattr(job_config.training, "val_times", 0)
-    val_interval = (job_config.training.steps // val_times) if val_times > 0 else 0
-    val_data_dir = getattr(job_config.training, "val_data_dir", None)
-
-    if val_data_dir is not None:    # User explicitly specified val data path
-        if os.path.isfile(val_data_dir):    # Directly passed file path (e.g. parquet)
-            val_parquet = val_data_dir
-        elif val_data_dir.endswith(".json.gz") or "*" in val_data_dir:    # Passed is a glob pattern
-            val_parquet = val_data_dir
-        else:    # Passed is a directory, automatically find parquet file
-            val_parquet = os.path.join(val_data_dir, "validation-00000-of-00001.parquet")
-    else:
-        # Not specified val_data_dir, automatically select based on training dataset
-        training_dataset = getattr(job_config.training, "dataset", "")
-        training_data_files = getattr(job_config.training, "data_files", "") or ""
-        training_data_dir_cfg = getattr(job_config.training, "data_dir", "") or ""
-        is_c4 = (
-            training_dataset == "json" and ("c4" in training_data_files.lower() or "c4" in training_data_dir_cfg.lower())
-        )
-        if is_c4:    # C4 training, default to use C4 built-in validation set
-            if training_data_files and "c4" in training_data_files.lower():
-                c4_dir = os.path.dirname(training_data_files.split(",")[0])
-            else:
-                c4_dir = training_data_dir_cfg.split(",")[0]
-            val_parquet = os.path.join(c4_dir, "c4-validation.*.json.gz")
-            logger.info(f"{color.yellow}C4 training detected: using C4 built-in validation set for PPL eval: {val_parquet}{color.reset}")
-        else:   # Default to use wiki_val
-            val_parquet = os.path.join(os.getcwd(), "data/wiki_val", "validation-00000-of-00001.parquet")
-
-    # ------ jinxin ------ #
-    # Pre-cache val chunks once before training — each evaluate_ppl call reuses
-    # this cache with zero IO / tokenization overhead.
-    C4_TARGET_EVAL_TOKENS = 10_000_000
-    logger.info(f"{color.yellow}Pre-caching val chunks from {val_parquet} ...{color.reset}")
-    val_chunks_cache = build_val_chunks_cache(
-        val_data_path=val_parquet,
-        tokenizer=tokenizer,
-        seq_len=job_config.training.seq_len,
-        world_mesh=world_mesh,
-        parallel_dims=parallel_dims,
-        c4_target_eval_tokens=C4_TARGET_EVAL_TOKENS,
-    )
-    logger.info(
-        f"{color.yellow}Val cache ready: {len(val_chunks_cache)} chunks "
-        f"({len(val_chunks_cache) * job_config.training.seq_len:,} tokens per rank){color.reset}"
-    )
-
     # train loop
     logger.info(f"{color.red}***** Running training *****{color.reset}")
     logger.info(f"{color.green}  Training starts at step {train_state.step + 1}")
@@ -720,13 +467,6 @@ def main(job_config: JobConfig):
     logger.info(
         f"{color.green}  Number of parameters = {model_param_count:,} {color.reset}"
     )
-
-    # ------ jinxin ------ #
-    if val_interval > 0:
-        logger.info(
-            f"{color.green}Val PPL will be computed every {val_interval} steps "
-            f"({val_times} times total). Val data: {val_parquet}{color.reset}"
-        )
 
     with (
         maybe_enable_profiling(
@@ -927,31 +667,6 @@ def main(job_config: JobConfig):
                 train_state.step, force=(train_state.step == job_config.training.steps)
             )
 
-            # ------ jinxin ------ #
-            # Compute validation PPL during training by val_interval
-            # if val_interval > 0 and train_state.step % val_interval == 0:
-            if val_interval - 1 > 0 and train_state.step % val_interval == 0:
-                val_ppl = evaluate_ppl(
-                    model=model_parts[0],
-                    tokenizer=tokenizer,
-                    val_data_path=val_parquet,
-                    batch_size=job_config.training.batch_size,
-                    seq_len=job_config.training.seq_len,
-                    device=device,
-                    device_type=device_type,
-                    world_mesh=world_mesh,
-                    parallel_dims=parallel_dims,
-                    maybe_enable_amp=maybe_enable_amp,
-                    color=color,
-                    step=train_state.step,
-                    chunks_cache=val_chunks_cache,
-                )
-                if torch.distributed.get_rank() == 0:
-                    logger.info(
-                        f"{color.cyan}[Val PPL] step={train_state.step} | PPL={val_ppl:.4f}{color.reset}"
-                    )
-                metric_logger.logger.log({"val/ppl": val_ppl}, train_state.step)
-
             # signal the profiler that the next profiling step has started
             if torch_profiler:
                 torch_profiler.step()
@@ -969,30 +684,6 @@ def main(job_config: JobConfig):
     if torch.distributed.get_rank() == 0:
         logger.info("Sleeping 2 seconds for other ranks to complete")
         time.sleep(2)
-
-    # ------ jinxin ------ #
-    # Compute final validation PPL on wiki_val after training
-    logger.info("Computing final validation PPL on wiki_val...")
-    final_val_ppl = evaluate_ppl(
-        model=model_parts[0],
-        tokenizer=tokenizer,
-        val_data_path=val_parquet,
-        batch_size=job_config.training.batch_size,
-        seq_len=job_config.training.seq_len,
-        device=device,
-        device_type=device_type,
-        world_mesh=world_mesh,
-        parallel_dims=parallel_dims,
-        maybe_enable_amp=maybe_enable_amp,
-        color=color,
-        step=job_config.training.steps,
-        chunks_cache=val_chunks_cache,
-    )
-    if torch.distributed.get_rank() == 0:
-        logger.info(
-            f"{color.cyan}[Final Val PPL] step={job_config.training.steps} | PPL={final_val_ppl:.4f}{color.reset}"
-        )
-    metric_logger.logger.log({"val/ppl_final": final_val_ppl}, job_config.training.steps)
 
     metric_logger.close()
     logger.info("Training completed")

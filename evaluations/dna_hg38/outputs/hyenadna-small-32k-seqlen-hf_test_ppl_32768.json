@@ -1,0 +1,12 @@
+{
+  "model_dir": "/yuchang/lsy_jx/OpenToMe/models/hyenadna-small-32k-seqlen-hf",
+  "fasta": "/yuchang/lsy_jx/OpenToMe/data/hg38/hg38.ml.fa.gz",
+  "bed": "/yuchang/lsy_jx/OpenToMe/data/hg38/human-sequences.bed",
+  "split": "test",
+  "max_length": 32768,
+  "sequences": 1937,
+  "tokens": 63469679,
+  "nll": 68831410.76171875,
+  "mean_nll": 1.0844770581196534,
+  "perplexity": 2.9578926083017345
+}

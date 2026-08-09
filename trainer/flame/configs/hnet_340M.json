@@ -1,0 +1,27 @@
+{
+    "model_type": "hnet",
+    "arch_layout": ["m4", ["T1m4", ["T26"], "m4T1"], "m4"],
+    "d_model": [512, 512, 768],
+    "d_intermediate": [0, 0, 2048],
+    "vocab_size": 256,
+    "ssm_cfg": {
+        "d_state": 128,
+        "d_conv": 4,
+        "expand": 2,
+        "chunk_size": 256
+    },
+    "attn_cfg": {
+        "num_heads": [8, 8, 12],
+        "rotary_emb_dim": [32, 32, 32],
+        "window_size": [-1, -1, -1]
+    },
+    "tie_embeddings": false,
+    "initializer_range": 0.02,
+    "fuse_cross_entropy": true,
+    "fuse_linear_cross_entropy": false,
+    "use_l2warp": false,
+    "lb_loss_weight": 0.001,
+    "lb_loss_N": 4.0,
+    "dechunk_headdim": 32,
+    "dechunk_block_size": 256
+}

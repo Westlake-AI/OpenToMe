@@ -1,0 +1,46 @@
+# 论文清单 — 可重建 manifest
+# 格式: filename <TAB> type <TAB> source <TAB> group <TAB> title
+#   type=arxiv → source 为 arXiv ID，下载 https://arxiv.org/pdf/<ID>
+#   type=url   → source 为完整 PDF URL（期刊/PMC 开放获取）
+#   type=manual→ source 为参考页 URL，脚本跳过，需浏览器手动下载（bioRxiv Cloudflare 拦截）
+# 本文件是 fetch_papers.sh 的唯一数据源：编辑此表即可增删/重下论文。
+# ---------------------------------------------------------------------------
+# A. 代表性开源 DNA 模型
+hyenadna_2306.15794.pdf	arxiv	2306.15794	A_open_dna	HyenaDNA: Long-Range Genomic Sequence Modeling at Single Nucleotide Resolution
+caduceus_2403.03234.pdf	arxiv	2403.03234	A_open_dna	Caduceus: Bi-Directional Equivariant Long-Range DNA Sequence Modeling
+dnabert2_2306.15006.pdf	arxiv	2306.15006	A_open_dna	DNABERT-2: Efficient Foundation Model and Benchmark for Multi-Species Genome
+dnagpt_2307.05628.pdf	arxiv	2307.05628	A_open_dna	DNAGPT: A Generalized Pre-trained Tool for Versatile DNA Sequence Analysis
+hybridna_2502.10807.pdf	arxiv	2502.10807	A_open_dna	HybriDNA: A Hybrid Transformer-Mamba2 Long-Range DNA Language Model
+convnova_2502.18538.pdf	arxiv	2502.18538	A_open_dna	ConvNova: Revisiting Convolution Architecture in DNA Foundation Models
+dnabert_bioinformatics_2021_PMC11025658.pdf	url	https://europepmc.org/articles/PMC11025658?pdf=render	A_open_dna	DNABERT (Bioinformatics 2021)
+nucleotide_transformer_natmethods_2024_PMC11810778.pdf	url	https://europepmc.org/articles/PMC11810778?pdf=render	A_open_dna	Nucleotide Transformer (Nature Methods 2024)
+gpn_pnas_2023_PMC10622914.pdf	url	https://europepmc.org/articles/PMC10622914?pdf=render	A_open_dna	GPN: DNA language models predict genome-wide variant effects (PNAS 2023)
+evo_science_2024_PMC12057570.pdf	url	https://europepmc.org/articles/PMC12057570?pdf=render	A_open_dna	Evo: Sequence modeling and design from molecular to genome scale (Science 2024)
+# B. DNA 动态分词 / 自适应词表（HNet 的 DNA 直接对标）
+mergedna_2511.14806.pdf	arxiv	2511.14806	B_dna_dyntok	MergeDNA: Context-aware Genome Modeling with Dynamic Tokenization (SEED PAPER)
+vqdna_2405.10812.pdf	arxiv	2405.10812	B_dna_dyntok	VQDNA: Vector Quantization for Multi-Species Genomic Sequence Modeling
+mxdna_2412.13716.pdf	arxiv	2412.13716	B_dna_dyntok	MxDNA: Model Decides How to Tokenize (Adaptive DNA Tokenization)
+omnidna_2502.03499.pdf	arxiv	2502.03499	B_dna_dyntok	Omni-DNA: A Unified Genomic Foundation Model
+# C. 序列建模骨干与方法（OpenToMe 内复现目标）
+hnet_2507.07955.pdf	arxiv	2507.07955	C_backbone	HNet: Dynamic Chunking for End-to-End Hierarchical Sequence Modeling (TARGET)
+deltanet_2406.06484.pdf	arxiv	2406.06484	C_backbone	DeltaNet: Parallelizing Linear Transformers with the Delta Rule (TARGET)
+gated_deltanet_2412.06464.pdf	arxiv	2412.06464	C_backbone	Gated Delta Networks: Improving Mamba2 with Delta Rule
+mamba_2312.00752.pdf	arxiv	2312.00752	C_backbone	Mamba: Linear-Time Sequence Modeling with Selective State Spaces
+mamba2_2405.21060.pdf	arxiv	2405.21060	C_backbone	Mamba-2: Transformers are SSMs
+hyena_hierarchy_2302.10866.pdf	arxiv	2302.10866	C_backbone	Hyena Hierarchy: Towards Larger Convolutional Language Models
+# D. byte-level / 无分词分层建模（HNet 的 NLP 同族）
+blt_byte_latent_transformer_2412.09871.pdf	arxiv	2412.09871	D_byte_level	Byte Latent Transformer: Patches Scale Better Than Tokens
+mambabyte_2401.13660.pdf	arxiv	2401.13660	D_byte_level	MambaByte: Token-free Selective State Space Model
+megabyte_2305.07185.pdf	arxiv	2305.07185	D_byte_level	MEGABYTE: Predicting Million-byte Sequences with Multiscale Transformers
+spacebyte_2404.14408.pdf	arxiv	2404.14408	D_byte_level	SpaceByte: Towards Deleting Tokenization from Large Language Modeling
+dynamic_token_pooling_2211.09761.pdf	arxiv	2211.09761	D_byte_level	Efficient Transformers with Dynamic Token Pooling
+# E. 闭源 / 标杆基因组模型
+enformer_natmethods_2021.pdf	url	https://www.nature.com/articles/s41592-021-01252-x.pdf	E_closed	Enformer: Effective gene expression prediction from sequence (Nature Methods 2021)
+# F. 评估基准论文
+genomic_benchmarks_bmc_2023.pdf	url	https://bmcgenomdata.biomedcentral.com/counter/pdf/10.1186/s12863-023-01123-8.pdf	F_benchmark	Genomic Benchmarks: a collection of datasets for genomic sequence classification
+genbench_2406.01627.pdf	arxiv	2406.01627	F_benchmark	GenBench: A Benchmarking Suite for Genomic Foundation Models
+# --- 未获取（bioRxiv Cloudflare 拦截，需浏览器手动下载到 papers/）---
+evo2_biorxiv_2025.02.18.638918.pdf	manual	https://www.biorxiv.org/content/10.1101/2025.02.18.638918	Z_manual	Evo 2: Genome modeling and design across all domains of life
+grover_biorxiv_2023.07.19.549677.pdf	manual	https://www.biorxiv.org/content/10.1101/2023.07.19.549677	Z_manual	GROVER: human genome vocabulary via DNA language model
+gena_lm_biorxiv.pdf	manual	https://github.com/AIRI-Institute/GENA_LM	Z_manual	GENA-LM: Multimodal pretraining for the central dogma
+gpn_msa_biorxiv_2023.10.10.561776.pdf	manual	https://www.biorxiv.org/content/10.1101/2023.10.10.561776	Z_manual	GPN-MSA: variant effect via MSA

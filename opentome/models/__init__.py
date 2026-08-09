@@ -1,36 +1,31 @@
-import warnings
 
-# --- Classification (timm / torch only; keep importable without transformers) ---
+from opentome.models.blt import BltConfig, BltModel, BltForCausalLM
+from opentome.models.delta_net import DeltaNetConfig, DeltaNetForCausalLM, DeltaNetModel
+from opentome.models.gated_deltanet import GatedDeltaNetConfig, GatedDeltaNetForCausalLM, GatedDeltaNetModel
+from opentome.models.gla import GLAConfig, GLAForCausalLM, GLAModel
+from opentome.models.hnet import HNetConfig, HNetModel, HNetForCausalLM
+from opentome.models.hyena import HyenaConfig, HyenaDNAModel, HyenaDNAForCausalLM, HyenaDNAForSequenceClassification
+from opentome.models.transformer import TransformerConfig, TransformerForCausalLM, TransformerModel
+from opentome.models.mergenet_nlp import MergeNetConfig, MergeNetForCausalLM, MergeNetModel
+from opentome.models.gsa import GSAConfig, GSAForCausalLM, GSAModel
+# from opentome.models.qwen3_next import Qwen3NextConfig, Qwen3NextForCausalLM, Qwen3NextModel
+
+# --- Classification Models ---
 from opentome.models.deit.deit import DeiTModel, deit_s, deit_s_extend
 from opentome.models.mergenet.model import HybridToMeModel
 
 __all__ = [
+    'BltConfig', 'BltModel', 'BltForCausalLM',
+    'DeltaNetConfig', 'DeltaNetForCausalLM', 'DeltaNetModel',
+    'GatedDeltaNetConfig', 'GatedDeltaNetForCausalLM', 'GatedDeltaNetModel',
+    'GLAConfig', 'GLAForCausalLM', 'GLAModel',
+    'HNetConfig', 'HNetModel', 'HNetForCausalLM',
+    'HyenaConfig', 'HyenaDNAModel', 'HyenaDNAForCausalLM', 'HyenaDNAForSequenceClassification',
+    'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
+    'MergeNetConfig', 'MergeNetForCausalLM', 'MergeNetModel',
+    'GSAConfig', 'GSAForCausalLM', 'GSAModel',
+    # 'Qwen3NextConfig', 'Qwen3NextForCausalLM', 'Qwen3NextModel'
+
     'DeiTModel', 'deit_s', 'deit_s_extend',
     'HybridToMeModel',
 ]
-
-# --- Optional NLP stack (requires transformers, etc.) ---
-try:
-    from opentome.models.blt import BltConfig, BltModel, BltForCausalLM
-    from opentome.models.delta_net import DeltaNetConfig, DeltaNetForCausalLM, DeltaNetModel
-    from opentome.models.gated_deltanet import GatedDeltaNetConfig, GatedDeltaNetForCausalLM, GatedDeltaNetModel
-    from opentome.models.gla import GLAConfig, GLAForCausalLM, GLAModel
-    from opentome.models.transformer import TransformerConfig, TransformerForCausalLM, TransformerModel
-    from opentome.models.mergenet_nlp import MergeNetConfig, MergeNetForCausalLM, MergeNetModel
-    from opentome.models.gsa import GSAConfig, GSAForCausalLM, GSAModel
-    __all__.extend([
-        'BltConfig', 'BltModel', 'BltForCausalLM',
-        'DeltaNetConfig', 'DeltaNetForCausalLM', 'DeltaNetModel',
-        'GatedDeltaNetConfig', 'GatedDeltaNetForCausalLM', 'GatedDeltaNetModel',
-        'GLAConfig', 'GLAForCausalLM', 'GLAModel',
-        'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
-        'MergeNetConfig', 'MergeNetForCausalLM', 'MergeNetModel',
-        'GSAConfig', 'GSAForCausalLM', 'GSAModel',
-    ])
-except Exception as e:
-    warnings.warn(
-        f"opentome.models: NLP submodels not exported ({e!r}). "
-        "Classification models (DeiT, HybridToMe, etc.) remain available.",
-        ImportWarning,
-        stacklevel=2,
-    )

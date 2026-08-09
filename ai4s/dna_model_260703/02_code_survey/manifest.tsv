@@ -1,0 +1,13 @@
+# 代码仓库清单 — 可重建 manifest
+# 格式: dirname <TAB> git_url <TAB> role <TAB> note
+# clone_repos.sh 读取本表，用 --depth 1 浅克隆并删除 .git（节省空间）。
+# 编辑此表即可增删/重建参考仓库。
+# ---------------------------------------------------------------------------
+hyena-dna	https://github.com/HazyResearch/hyena-dna.git	blueprint	★数据/训练/评估蓝本；HG38Dataset + CharacterTokenizer + 因果LM
+caduceus	https://github.com/kuleshov-group/caduceus.git	blueprint	fork 自 hyena-dna；BiMamba/RC 等变；数据评估同源
+DNABERT_2	https://github.com/MAGICS-LAB/DNABERT_2.git	benchmark	★GUE 基准来源：finetune/train.py + GUE 数据下载说明
+nucleotide-transformer	https://github.com/instadeepai/nucleotide-transformer.git	benchmark	NT-bench(18任务) 模型库；下游任务在 HF datasets
+OpenToMe	https://github.com/Westlake-AI/OpenToMe.git	platform	★复现平台；含 trainer/flame + opentome/models(transformer++/delta_net/mergenet_nlp)
+flame	https://github.com/fla-org/flame.git	platform	训练引擎(torchtitan 底座) 上游参考；OpenToMe 内已 vendored
+flash-linear-attention	https://github.com/fla-org/flash-linear-attention.git	platform	★fla：Transformer++/DeltaNet/GatedDeltaNet/Mamba 等 HF 模型
+hnet	https://github.com/goombalab/hnet.git	target	★待复现 HNet 原版；models/hnet.py + modules/dc.py(动态分块)

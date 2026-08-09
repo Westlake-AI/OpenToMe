@@ -1,0 +1,12 @@
+{
+  "model_dir": "/yuchang/lsy_jx/OpenToMe/trainer/flame/exp/dna/hyenadna_small_32k/hg38.seqlen_schedule0:32k,2:64k,5:128k.epochs5.global_batch256.warmup1pct.4gpus.lr1e-3/step-665",
+  "fasta": "/yuchang/lsy_jx/OpenToMe/data/hg38/hg38.ml.fa.gz",
+  "bed": "/yuchang/lsy_jx/OpenToMe/data/hg38/human-sequences.bed",
+  "split": "test",
+  "max_length": 32768,
+  "sequences": 1937,
+  "tokens": 63469679,
+  "nll": 80562684.04296875,
+  "mean_nll": 1.2693097761368661,
+  "perplexity": 3.558395624959834
+}

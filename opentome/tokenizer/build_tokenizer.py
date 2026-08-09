@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from .blt_tokenizer import BltTokenizer
+from .dna_tokenizer import DNATokenizer
 from .tiktoken_tokenizer import TikTokenTokenizer
 
 try:
@@ -37,6 +38,8 @@ class TokenizerArgs(BaseModel):
             init_kwargs = self.init_kwargs
         if self.name == "blt":
             return BltTokenizer(**init_kwargs)
+        elif self.name == "dna":
+            return DNATokenizer(**init_kwargs)
         elif self.name == "mock":
             raise ValueError("TODO.")
         elif self.name == "sp":
