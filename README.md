@@ -220,8 +220,9 @@ python -m harness --model hf \
 - [x] Throughput
 - [x] ToMe Visualization
 - [x] Optimizers
-- [ ] AI for Science
+- [x] AI for Science (training HG38)
 - [ ] Image Generation
+- [x] LLM Inference
 - [ ] MLLM Inference
 
 ## Summary Functions
