@@ -214,16 +214,23 @@ python -m harness --model hf \
 
 ## Support Tasks (TODO List)
 
-- [x] Image Classification
-- [x] LLM Inference 
-- [x] Long Sequence Training
-- [x] Throughput
-- [x] ToMe Visualization
+### Methods
+- [x] Token Merge
+- [x] KV Cache Compress
+- [x] Long Sequence Modeling
 - [x] Optimizers
-- [x] AI for Science (training HG38)
-- [ ] Image Generation
+
+### Tasks
+- [x] Image Classification
 - [x] LLM Inference
 - [ ] MLLM Inference
+- [x] AI for Science (Training HG38)
+- [ ] Image Generation
+
+### Metrics
+- [x] Throughput
+- [x] ToMe Visualization
+
 
 ## Summary Functions
 
