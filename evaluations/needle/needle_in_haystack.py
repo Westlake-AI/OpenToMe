@@ -1,48 +1,75 @@
-"""
-This script is adapted from 
-https://github.com/gkamradt/LLMTest_NeedleInAHaystack
+"""Needle-in-a-haystack evaluation with optional KV cache compression.
+
+Adapted from https://github.com/gkamradt/LLMTest_NeedleInAHaystack.
 """
 
-import os
+import argparse
+import re
 import glob
 import json
-from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
+import os
+import time
+import sys
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import numpy as np
-import argparse
-from rouge_score import rouge_scorer
-
-scorer = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True)
-
-from datetime import datetime, timezone
-import time
 import torch
+try:
+    from rouge_score import rouge_scorer
+except ImportError:
+    rouge_scorer = None
+from transformers import AutoModelForCausalLM, AutoTokenizer, GenerationConfig
 
-# ------ jinxin added ------ #
-backbone = os.environ.get("BACKBONE", "None")
-print("*" * 50)
-if "gated_deltanet" in backbone:
-    print("Gated-DeltaNet")
-    import fla.models.gated_deltanet
-elif "delta_net" in backbone:
-    print("DeltaNet")
-    import fla.models.delta_net
-elif "gla" in backbone:
-    print("GLA")
-    import fla.models.gla
-elif "transformer" in backbone:
-    print("Transformer++")
-    import fla.models.transformer
-else:
-    print("None")
-print("*" * 50)
+from evaluations.inference.kv_utils import (
+    METHOD_CHOICES,
+    build_cache,
+    cache_stats,
+    resolve_device,
+    resolve_dtype,
+    run_metadata,
+    write_json,
+)
+from opentome.compress import CompressedDynamicCache
+from opentome.models.kv_compression import patch_model_for_kv_compression
+
+
+SCORER = rouge_scorer.RougeScorer(["rouge1", "rougeL"], use_stemmer=True) if rouge_scorer else None
+
+
+def needle_rouge1_f1(reference, prediction):
+    if SCORER is not None:
+        return SCORER.score(reference, prediction)["rouge1"].fmeasure
+    reference_tokens = re.findall(r"\w+", reference.lower())
+    prediction_tokens = re.findall(r"\w+", prediction.lower())
+    if not reference_tokens or not prediction_tokens:
+        return 0.0
+    overlap = sum((Counter(reference_tokens) & Counter(prediction_tokens)).values())
+    if not overlap:
+        return 0.0
+    precision = overlap / len(prediction_tokens)
+    recall = overlap / len(reference_tokens)
+    return 2 * precision * recall / (precision + recall)
+
+
+def _load_backbone_registration():
+    backbone = os.environ.get("BACKBONE", "None")
+    if "gated_deltanet" in backbone:
+        import fla.models.gated_deltanet  # noqa: F401
+    elif "delta_net" in backbone:
+        import fla.models.delta_net  # noqa: F401
+    elif "gla" in backbone:
+        import fla.models.gla  # noqa: F401
+    elif "transformer" in backbone:
+        import fla.models.transformer  # noqa: F401
 
 
 class LLMNeedleHaystackTester:
-    """
-    This class is used to test the LLM Needle Haystack.
-    """
-
     def __init__(
         self,
         args,
@@ -59,11 +86,9 @@ class LLMNeedleHaystackTester:
         document_depth_percent_intervals=10,
         document_depth_percents=None,
         document_depth_percent_interval_type="linear",
-        # model_provider="LLaMa",
         model_name="",
         model_name_suffix=None,
-        tokenizer_path="",
-        num_concurrent_requests=1,
+        tokenizer_path=None,
         save_results=True,
         save_contexts=True,
         final_context_length_buffer=200,
@@ -71,468 +96,365 @@ class LLMNeedleHaystackTester:
         print_ongoing_status=True,
         simulation_length=50,
     ):
-        """
-        :param needle: The needle to be found in the haystack. Default is None.
-        :param haystack_dir: The directory of text files to use as background context (or a haystack) in which the needle is to be found. Default is Paul Graham Essays.
-        :param retrieval_question: The question which with to prompt the model to do the retrieval.
-        :param results_version: In case you would like to try the same combination of model, context length, and depth % multiple times, change the results version other than 1
-        :param num_concurrent_requests: Due to volume, this object is set up to run concurrent requests, default = 1. Be careful of rate limits.
-        :param save_results: Whether or not you would like to save your contexts to file. Warning: These will get long! Default = True
-        :param save_contexts: Whether or not you would like to save your contexts to file. Warning: These will get long! Default is True.
-        :param final_context_length_buffer: The amount of cushion you'd like to leave off the input context to allow for the output context. Default 200 tokens
-        :param context_lengths_min: The minimum length of the context. Default is 1000.
-        :param context_lengths_max: The maximum length of the context. Default is 200000.
-        :param context_lengths_num_intervals: The number of intervals for the context length. Default is 35.
-        :param context_lengths: The lengths of the context. Default is None.
-        :param document_depth_percent_min: The minimum depth percent of the document. Default is 0.
-        :param document_depth_percent_max: The maximum depth percent of the document. Default is 100.
-        :param document_depth_percent_intervals: The number of intervals for the document depth percent. Default is 35.
-        :param document_depth_percents: The depth percentages of the document. Default is None.
-        :param document_depth_percent_interval_type: The type of interval for the document depth percent. Must be either 'linear' or 'sigmoid'. Default is 'linear'.
-        :param model_name: The name of the model. Default is 'gpt-4-1106-preview'.
-        :param seconds_to_sleep_between_completions: The number of seconds to sleep between completions. Default is None.
-        :param print_ongoing_status: Whether or not to print the ongoing status. Default is True.
-        """
         if not needle or not haystack_dir or not retrieval_question:
-            raise ValueError(
-                "Needle, haystack, and retrieval_question must be provided."
-            )
+            raise ValueError("Needle, haystack, and retrieval_question must be provided")
+        if simulation_length < 0:
+            raise ValueError("simulation_length must be non-negative")
 
         self.args = args
+        self.work_dir = Path(args.work_dir)
         self.needle = needle
         self.haystack_dir = haystack_dir
         self.retrieval_question = retrieval_question
         self.results_version = results_version
-        self.num_concurrent_requests = num_concurrent_requests
         self.save_results = save_results
-        self.final_context_length_buffer = final_context_length_buffer
         self.save_contexts = save_contexts
+        self.final_context_length_buffer = final_context_length_buffer
         self.seconds_to_sleep_between_completions = seconds_to_sleep_between_completions
         self.print_ongoing_status = print_ongoing_status
-        # self.model_provider = model_provider
         self.testing_results = []
-
-        if "/" in model_name:
-            self.model_version = model_name.split("/")[-1]
-        else:
-            self.model_version = model_name
-        if model_name_suffix is not None:
-            self.model_version += "_" + model_name_suffix
-
-        if context_lengths is None:
-            if (
-                context_lengths_min is None
-                or context_lengths_max is None
-                or context_lengths_num_intervals is None
-            ):
-                raise ValueError(
-                    "Either context_lengths_min, context_lengths_max, context_lengths_intervals need to be filled out OR the context_lengths_list needs to be supplied."
-                )
-            else:
-                self.context_lengths = np.round(
-                    np.linspace(
-                        context_lengths_min,
-                        context_lengths_max,
-                        num=context_lengths_num_intervals,
-                        endpoint=True,
-                    )
-                ).astype(int)
-        else:
-            self.context_lengths = context_lengths
-
-        if document_depth_percents is None:
-            if (
-                document_depth_percent_min is None
-                or document_depth_percent_max is None
-                or document_depth_percent_intervals is None
-            ):
-                raise ValueError(
-                    "Either document_depth_percent_min, document_depth_percent_max, document_depth_percent_intervals need to be filled out OR the document_depth_percents needs to be supplied."
-                )
-            else:
-                if document_depth_percent_interval_type == "linear":
-                    self.document_depth_percents = np.round(
-                        np.linspace(
-                            document_depth_percent_min,
-                            document_depth_percent_max,
-                            num=document_depth_percent_intervals,
-                            endpoint=True,
-                        )
-                    ).astype(int)
-                elif document_depth_percent_interval_type == "sigmoid":
-                    self.document_depth_percents = [
-                        self.logistic(x)
-                        for x in np.linspace(
-                            document_depth_percent_min,
-                            document_depth_percent_max,
-                            document_depth_percent_intervals,
-                        )
-                    ]
-        else:
-            self.document_depth_percents = document_depth_percents
-
-        if document_depth_percent_interval_type not in [None, "linear", "sigmoid"]:
-            raise ValueError(
-                "document_depth_percent_interval_type must be either None, 'linear' or 'sigmoid'. If you'd like your own distribution give a list of ints in via document_depth_percent_intervals"
-            )
-
+        self.simulation_length = simulation_length
         self.model_name = model_name
-        self.tokenizer_path = tokenizer_path
+        self.method = args.method
 
-        self.enc = AutoTokenizer.from_pretrained(tokenizer_path, use_fast=False)
-        # self.enc = AutoTokenizer.from_pretrained(tokenizer_path, 
-                                                # trust_remote_code=True,
-                                                # model_max_length=int(1e10),
-                                                # )
-        self.generation_config = GenerationConfig.from_pretrained(model_name)
-        self.eos_token_ids = self.generation_config.eos_token_id
-        if not isinstance(self.eos_token_ids, list):
-            self.eos_token_ids = [self.eos_token_ids]
+        self.model_version = Path(model_name).name
+        if model_name_suffix:
+            self.model_version += f"_{model_name_suffix}"
+        if self.method != "none":
+            self.model_version += f"_{self.method}_{args.max_capacity_prompt}"
 
+        self.context_lengths = self._context_lengths(
+            context_lengths,
+            context_lengths_min,
+            context_lengths_max,
+            context_lengths_num_intervals,
+        )
+        self.document_depth_percents = self._document_depths(
+            document_depth_percents,
+            document_depth_percent_min,
+            document_depth_percent_max,
+            document_depth_percent_intervals,
+            document_depth_percent_interval_type,
+        )
+
+        tokenizer_path = tokenizer_path or model_name
+        self.enc = AutoTokenizer.from_pretrained(
+            tokenizer_path,
+            use_fast=args.use_fast_tokenizer,
+            trust_remote_code=args.trust_remote_code,
+        )
         if self.enc.pad_token_id is None:
-            if self.enc.eos_token_id is not None:
-                self.enc.pad_token_id = self.enc.eos_token_id
-            else:
-                self.enc.pad_token_id = 0
-        print("Loading from %s" % model_name)
+            self.enc.pad_token_id = self.enc.eos_token_id if self.enc.eos_token_id is not None else 0
+        try:
+            generation_config = GenerationConfig.from_pretrained(model_name)
+            eos_token_ids = generation_config.eos_token_id
+        except OSError:
+            eos_token_ids = self.enc.eos_token_id
+        self.eos_token_ids = eos_token_ids if isinstance(eos_token_ids, list) else [eos_token_ids]
+        self.eos_token_ids = [token for token in self.eos_token_ids if token is not None]
 
-        self.model_to_test = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            dtype=torch.bfloat16,
-            attn_implementation="eager",
-            device_map="auto"
-        ).eval()
-
+        device = resolve_device(args.device)
+        dtype = resolve_dtype(args.dtype, device)
+        model_kwargs = {
+            "torch_dtype": dtype,
+            "attn_implementation": "eager",
+            "trust_remote_code": args.trust_remote_code,
+        }
+        if args.device_map:
+            model_kwargs["device_map"] = args.device_map
+            self.model_to_test = AutoModelForCausalLM.from_pretrained(
+                model_name, **model_kwargs
+            ).eval()
+        else:
+            self.model_to_test = AutoModelForCausalLM.from_pretrained(
+                model_name, **model_kwargs
+            ).to(device).eval()
+        if self.method != "none":
+            patch_model_for_kv_compression(self.model_to_test)
+        self.device = next(self.model_to_test.parameters()).device
         self.model_to_test_description = model_name
 
-        self.simulation_length = simulation_length
-        model_name = model_name.split("/")[-1]
+        if self.save_results:
+            write_json(self.work_dir / "results" / self.model_version / "metadata.json", run_metadata(args))
 
-    def logistic(self, x, L=100, x0=50, k=0.1):
-        if x == 0:
-            return 0
-        if x == 100:
-            return 100
+    @staticmethod
+    def _context_lengths(values, minimum, maximum, intervals):
+        if values is not None:
+            return np.asarray(values, dtype=int)
+        if minimum is None or maximum is None or intervals is None:
+            raise ValueError("Context length range or explicit values are required")
+        return np.round(np.linspace(minimum, maximum, num=intervals, endpoint=True)).astype(int)
+
+    @staticmethod
+    def _document_depths(values, minimum, maximum, intervals, interval_type):
+        if values is not None:
+            return values
+        if minimum is None or maximum is None or intervals is None:
+            raise ValueError("Document depth range or explicit values are required")
+        points = np.linspace(minimum, maximum, intervals)
+        if interval_type == "linear":
+            return np.round(points).astype(int)
+        if interval_type == "sigmoid":
+            return [LLMNeedleHaystackTester.logistic(x) for x in points]
+        raise ValueError("document_depth_percent_interval_type must be linear or sigmoid")
+
+    @staticmethod
+    def logistic(x, L=100, x0=50, k=0.1):
+        if x == 0 or x == 100:
+            return x
         return np.round(L / (1 + np.exp(-k * (x - x0))), 3)
 
-    def bound_evaluate_and_log(self, *args):
-        self.evaluate_and_log(*args)
-
     def run_test(self, args):
-        # Run through each iteration of context_lengths and depths
-        tasks = []
         for context_length in self.context_lengths:
             if context_length < args.s_len or context_length > args.e_len:
                 continue
             for depth_percent in self.document_depth_percents:
-                task = self.bound_evaluate_and_log(context_length, depth_percent)
+                self.evaluate_and_log(context_length, depth_percent)
 
     def generate_prompt(self, context):
-        test_format = f"<|im_start|> This is a very long story book: <book> {context} </book>.\n\nQuestion: Based on the content of the book, {self.retrieval_question}"
-        return test_format
+        return (
+            f"<|im_start|> This is a very long story book: <book> {context} </book>.\n\n"
+            f"Question: Based on the content of the book, {self.retrieval_question}"
+        )
+
+    def _position_ids(self, cache, token_count):
+        if isinstance(cache, CompressedDynamicCache):
+            start = cache.get_logical_length()
+        else:
+            start = cache.get_seq_length()
+        return torch.arange(start, start + token_count, device=self.device).unsqueeze(0)
+
+    def _model_step(self, input_ids, cache):
+        kwargs = {"input_ids": input_ids, "past_key_values": cache, "use_cache": True}
+        if isinstance(cache, CompressedDynamicCache):
+            kwargs["position_ids"] = self._position_ids(cache, input_ids.shape[-1])
+        output = self.model_to_test(**kwargs)
+        return output, output.past_key_values
+
+    @torch.inference_mode()
+    def _generate_response(self, prompt_input_ids):
+        cache = build_cache(self.args, self.model_to_test) if self.method != "none" else None
+        suffix_length = min(self.simulation_length, max(0, prompt_input_ids.shape[-1] - 1))
+        if suffix_length:
+            prefill_ids = prompt_input_ids[:, :-suffix_length]
+            suffix_ids = prompt_input_ids[:, -suffix_length:]
+        else:
+            prefill_ids = prompt_input_ids
+            suffix_ids = prompt_input_ids[:, :0]
+
+        if self.args.prefilling_chunk_size is None:
+            output, cache = self._model_step(prefill_ids, cache)
+        else:
+            output = None
+            for offset in range(0, prefill_ids.shape[-1], self.args.prefilling_chunk_size):
+                output, cache = self._model_step(
+                    prefill_ids[:, offset : offset + self.args.prefilling_chunk_size], cache
+                )
+        for input_id in suffix_ids[0]:
+            output, cache = self._model_step(input_id.view(1, 1), cache)
+        if output is None:
+            raise ValueError("Prompt produced no input tokens")
+
+        next_token = output.logits[:, -1].argmax(dim=-1, keepdim=True)
+        generated = [next_token.item()]
+        for _ in range(self.args.max_new_tokens - 1):
+            output, cache = self._model_step(next_token, cache)
+            next_token = output.logits[:, -1].argmax(dim=-1, keepdim=True)
+            generated.append(next_token.item())
+            if next_token.item() in self.eos_token_ids:
+                break
+        return self.enc.decode(generated, skip_special_tokens=True).strip(), cache
 
     def evaluate_and_log(self, context_length, depth_percent):
-        # Checks to see if you've already checked a length/percent/version.
-        # This helps if the program stop running and you want to restart later
-        if self.save_results:
-            if self.result_exists(context_length, depth_percent):
-                print("result exists, skipping")
-                return
-            else:
-                print("result does not exist, testing")
-
-        # Go generate the required length context and place your needle statement in
+        if self.save_results and self.result_exists(context_length, depth_percent):
+            print("result exists, skipping")
+            return
         context = self.generate_context(context_length, depth_percent)
-
-        # Prepare your message to send to the model you're going to evaluate
         prompt = self.generate_prompt(context)
+        prompt_input_ids = self.enc(prompt, return_tensors="pt")["input_ids"].to(self.device)
 
-        test_start_time = time.time()
-
-        # Simulate multiround conversation
-        prompt = self.enc(prompt, return_tensors="pt")
-
-        prompt_input_ids = prompt["input_ids"].to(self.model_to_test.device)
-
-        simulation_start_idx = prompt_input_ids.size(1) - self.simulation_length
-
-        question_input_ids = prompt_input_ids[:, simulation_start_idx:]
-        prompt_input_ids = prompt_input_ids[:, :simulation_start_idx]
-
-        with torch.no_grad():
-            if self.args.prefilling_chunk_size is not None:
-                past_key_values = None
-                for i in range(
-                    0, prompt_input_ids.size(1), self.args.prefilling_chunk_size
-                ):
-                    chunk = prompt_input_ids[:, i : i + self.args.prefilling_chunk_size]
-                    output = self.model_to_test(
-                        input_ids=chunk,
-                        past_key_values=past_key_values,
-                        use_cache=True,
-                    )
-                    past_key_values = output.past_key_values
-            else:
-                output = self.model_to_test(
-                    input_ids=prompt_input_ids, past_key_values=None, use_cache=True
-                )
-                past_key_values = output.past_key_values
-
-            for input_id in question_input_ids[0]:
-                output = self.model_to_test(
-                    input_ids=input_id.unsqueeze(0).unsqueeze(0),
-                    past_key_values=past_key_values,
-                    use_cache=True,
-                )
-                past_key_values = output.past_key_values
-
-            pred_token_idx = output.logits[:, -1, :].argmax(dim=-1).unsqueeze(1)
-            generated_content = [pred_token_idx.item()]
-            for _ in range(50):
-                outputs = self.model_to_test(
-                    input_ids=pred_token_idx,
-                    past_key_values=past_key_values,
-                    use_cache=True,
-                )
-
-                past_key_values = outputs.past_key_values
-                pred_token_idx = outputs.logits[:, -1, :].argmax(dim=-1).unsqueeze(1)
-                generated_content += [pred_token_idx.item()]
-                if pred_token_idx.item() in self.eos_token_ids:
-                    break
-
-        response = self.enc.decode(generated_content, skip_special_tokens=True).strip()
-
-        test_end_time = time.time()
-        test_elapsed_time = test_end_time - test_start_time
-        score = scorer.score(self.needle, response)["rouge1"].fmeasure * 10
-
+        start = time.perf_counter()
+        response, cache = self._generate_response(prompt_input_ids)
+        elapsed = time.perf_counter() - start
+        score = needle_rouge1_f1(self.needle, response) * 10
         results = {
-            # 'context' : context, # Uncomment this line if you'd like to save the context the model was asked to retrieve from. Warning: This will become very large.
             "model": self.model_to_test_description,
+            "method": self.method,
             "context_length": int(context_length),
             "depth_percent": float(depth_percent),
             "version": self.results_version,
             "needle": self.needle,
             "model_response": response,
             "score": score,
-            "test_duration_seconds": test_elapsed_time,
-            "test_timestamp_utc": datetime.now(timezone.utc).strftime(
-                "%Y-%m-%d %H:%M:%S%z"
-            ),
+            "test_duration_seconds": elapsed,
+            "test_timestamp_utc": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S%z"),
+            **cache_stats(cache),
         }
-
         self.testing_results.append(results)
-
         if self.print_ongoing_status:
-            print(f"-- Test Summary -- ")
-            print(f"Duration: {test_elapsed_time:.1f} seconds")
-            print(f"Context: {context_length} tokens")
-            print(f"Depth: {depth_percent}%")
-            print(f"Score: {score}")
-            print(f"Response: {response}\n")
+            print(
+                f"Duration: {elapsed:.1f}s | Context: {context_length} | "
+                f"Depth: {depth_percent}% | Score: {score}\nResponse: {response}\n"
+            )
+        self._save_case(context, context_length, depth_percent, results)
+        if self.seconds_to_sleep_between_completions:
+            time.sleep(self.seconds_to_sleep_between_completions)
 
-        context_file_location = f'{self.model_version.replace(".", "_")}_len_{context_length}_depth_{int(depth_percent*100)}'
+    def _case_name(self, context_length, depth_percent):
+        return (
+            f'{self.model_version.replace(".", "_")}_len_{context_length}_'
+            f"depth_{int(depth_percent * 100)}"
+        )
 
+    def _save_case(self, context, context_length, depth_percent, results):
+        case_name = self._case_name(context_length, depth_percent)
         if self.save_contexts:
-            results["file_name"] = context_file_location
-
-            # Save the context to file for retesting
-            if not os.path.exists("contexts"):
-                os.makedirs("contexts")
-
-            if not os.path.exists(f"contexts/{self.model_version}"):
-                os.makedirs(f"contexts/{self.model_version}")
-
-            with open(
-                f"contexts/{self.model_version}/{context_file_location}_context.txt",
-                "w",
-                encoding="utf-8",
-            ) as f:
-                f.write(context)
-
+            context_dir = self.work_dir / "contexts" / self.model_version
+            context_dir.mkdir(parents=True, exist_ok=True)
+            results["file_name"] = case_name
+            (context_dir / f"{case_name}_context.txt").write_text(context, encoding="utf-8")
         if self.save_results:
-            # Save the context to file for retesting
-            if not os.path.exists("results"):
-                os.makedirs("results")
-
-            if not os.path.exists(f"results/{self.model_version}"):
-                os.makedirs(f"results/{self.model_version}")
-
-            # Save the result to file for retesting
-            p = f"results/{self.model_version}/{context_file_location}_results.json"
-            print("Writing at %s" % p)
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(results, f)
+            result_dir = self.work_dir / "results" / self.model_version
+            result_dir.mkdir(parents=True, exist_ok=True)
+            write_json(result_dir / f"{case_name}_results.json", results)
 
     def result_exists(self, context_length, depth_percent):
-        """
-        Checks to see if a result has already been evaluated or not
-        """
-
-        results_dir = "results/" + self.model_version
-        print("Searching existing results at %s" % results_dir)
-        if not os.path.exists(results_dir):
+        result_path = self.work_dir / "results" / self.model_version / (
+            self._case_name(context_length, depth_percent) + "_results.json"
+        )
+        if not result_path.exists():
             return False
-        for filename in os.listdir(results_dir):
-            if filename.endswith(".json"):
-                with open(os.path.join(results_dir, filename), "r") as f:
-                    result = json.load(f)
-                    context_length_met = result["context_length"] == context_length
-                    depth_percent_met = result["depth_percent"] == depth_percent
-                    version_met = result.get("version", 1) == self.results_version
-                    model_met = result["model"] == self.model_name
-                    # import ipdb; ipdb.set_trace()
-                    if (
-                        context_length_met
-                        and depth_percent_met
-                        and version_met
-                        and model_met
-                    ):
-                        return True
-        return False
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        return (
+            result.get("context_length") == context_length
+            and result.get("depth_percent") == depth_percent
+            and result.get("version", 1) == self.results_version
+            and result.get("model") == self.model_name
+            and result.get("method", "none") == self.method
+        )
 
     def generate_context(self, context_length, depth_percent):
-        # Load up tiktoken so we navigate tokens more easily
-
-        # Get your Paul Graham files loaded into a string
-        context = self.read_context_files()
-
-        # Truncate the Paul Graham essays to the context length you desire
-        context = self.encode_and_trim(context, context_length)
-
-        # Insert your random statement according to your depth percent
-        context = self.insert_needle(context, depth_percent, context_length)
-
-        return context
+        context = self.encode_and_trim(self.read_context_files(), context_length)
+        return self.insert_needle(context, depth_percent, context_length)
 
     def encode_text_to_tokens(self, text):
         return self.enc.encode(text, add_special_tokens=False)
 
     def insert_needle(self, context, depth_percent, context_length):
-        tokens_needle = self.encode_text_to_tokens(self.needle)
-        tokens_context = self.encode_text_to_tokens(context)
-
-        # Reducing the context length by 150 buffer. This is to account for system message, the user question, and response.
-        context_length -= self.final_context_length_buffer
-
-        # If your context + needle are longer than the context length (which it will be), then reduce tokens from the context by the needle length
-        if len(tokens_context) + len(tokens_needle) > context_length:
-            tokens_context = tokens_context[: context_length - len(tokens_needle)]
-
-        if depth_percent == 100:
-            # If your depth percent is 100 (which means your needle is the last thing in the doc), throw it at the end
-            tokens_new_context = tokens_context + tokens_needle
-        else:
-            insertion_point = int(len(tokens_context) * (depth_percent / 100))
-
-            tokens_new_context = tokens_context[:insertion_point]
-
-            print(f"Insertion at {insertion_point} / {len(tokens_context)}")
-            tokens_new_context += tokens_needle + tokens_context[insertion_point:]
-
-        # Convert back to a string and return it
-        new_context = self.decode_tokens(tokens_new_context)
-        return new_context
+        needle_tokens = self.encode_text_to_tokens(self.needle)
+        context_tokens = self.encode_text_to_tokens(context)
+        available = context_length - self.final_context_length_buffer - len(needle_tokens)
+        if available < 0:
+            raise ValueError("context_length is smaller than the prompt buffer and needle")
+        context_tokens = context_tokens[:available]
+        insertion = len(context_tokens) if depth_percent == 100 else int(
+            len(context_tokens) * depth_percent / 100
+        )
+        return self.decode_tokens(
+            context_tokens[:insertion] + needle_tokens + context_tokens[insertion:]
+        )
 
     def get_context_length_in_tokens(self, context):
-        return len(self.enc.encode(context))
+        return len(self.enc.encode(context, add_special_tokens=False))
 
     def read_context_files(self):
-        context = ""
-        max_context_length = max(self.context_lengths)
-
-        while self.get_context_length_in_tokens(context) < max_context_length:
-            for file in glob.glob(f"{self.haystack_dir}/*.txt"):
-                with open(file, "r") as f:
-                    context += f.read()
+        files = sorted(glob.glob(f"{self.haystack_dir}/*.txt"))
+        if not files:
+            raise ValueError(f"No .txt files found under {self.haystack_dir}")
+        texts = [Path(path).read_text(encoding="utf-8", errors="ignore") for path in files]
+        block = "".join(texts)
+        if not block:
+            raise ValueError("Haystack files are empty")
+        context = block
+        target = max(self.context_lengths)
+        while self.get_context_length_in_tokens(context) < target:
+            context += block
         return context
-
-    def get_tokens_from_context(self, context):
-        return self.enc.encode(context)
 
     def decode_tokens(self, tokens, context_length=None):
         return self.enc.decode(tokens[:context_length], skip_special_tokens=True)
 
     def encode_and_trim(self, context, context_length):
-        tokens = self.get_tokens_from_context(context)
-        if len(tokens) > context_length:
-            context = self.decode_tokens(tokens, context_length)
-        return context
+        tokens = self.enc.encode(context, add_special_tokens=False)
+        return self.decode_tokens(tokens, context_length) if len(tokens) > context_length else context
 
     def get_results(self):
         return self.testing_results
 
-    def print_start_test_summary(self):
-        print("\n")
-        print("Starting Needle In A Haystack Testing...")
-        print(f"- Model: {self.model_name}")
-        print(
-            f"- Context Lengths: {len(self.context_lengths)}, Min: {min(self.context_lengths)}, Max: {max(self.context_lengths)}"
-        )
-        print(
-            f"- Document Depths: {len(self.document_depth_percents)}, Min: {min(self.document_depth_percents)}%, Max: {max(self.document_depth_percents)}%"
-        )
-        print(f"- Needle: {self.needle.strip()}")
-        print("\n\n")
-
     def start_test(self, args):
         if self.print_ongoing_status:
-            self.print_start_test_summary()
-        # asyncio.run(self.run_test())
+            print(
+                "Starting Needle In A Haystack Testing...\n"
+                f"- Model: {self.model_name}\n- Method: {self.method}\n"
+                f"- Context lengths: {min(self.context_lengths)}..{max(self.context_lengths)}\n"
+                f"- Document depths: {min(self.document_depth_percents)}..{max(self.document_depth_percents)}%"
+            )
         self.run_test(args)
 
 
-if __name__ == "__main__":
-    # Tons of defaults set, check out the LLMNeedleHaystackTester's init for more info
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-s", "--s_len", metavar="N", type=int, help="a number")
-    parser.add_argument("-e", "--e_len", metavar="N", type=int, help="a number")
-    parser.add_argument("--model_path", type=str, default=None, help="path to model")
-    parser.add_argument("--model_name", type=str, default=None, help="name of model")
-    parser.add_argument(
-        "--model_name_suffix", type=str, default=None, help="name of model"
-    )
-    parser.add_argument("--tokenizer_path", type=str, default=None, help="path of tokenizer")
-    # parser.add_argument(
-    #     "--model_provider", type=str, default="LLaMA", help="which model to use"
-    # )
-    # parser.add_argument(
-    #     "--attn_load_dir", type=str, default=None, help="attention pattern directory"
-    # )
-    parser.add_argument("--sink_size", type=int, default=None)
-    parser.add_argument("--recent_size", type=int, default=None)
-    parser.add_argument("--simulation_length", type=int, default=50)
-    parser.add_argument("--context_lengths_num_intervals", type=int, default=40)
-    parser.add_argument("--document_depth_percent_intervals", type=int, default=10)
-    parser.add_argument("--context_lengths_min", type=int, default=1000)
-    parser.add_argument("--context_lengths_max", type=int, default=1048000)
-    parser.add_argument("--document_depth_percent_min", type=int, default=0)
-    parser.add_argument("--document_depth_percent_max", type=int, default=100)
+def build_parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("-s", "--s-len", "--s_len", dest="s_len", type=int, required=True)
+    parser.add_argument("-e", "--e-len", "--e_len", dest="e_len", type=int, required=True)
+    parser.add_argument("--model-path", "--model_path", dest="model_path")
+    parser.add_argument("--model-name", "--model_name", dest="model_name")
+    parser.add_argument("--model-name-suffix", "--model_name_suffix", dest="model_name_suffix")
+    parser.add_argument("--tokenizer-path", "--tokenizer_path", dest="tokenizer_path")
+    parser.add_argument("--haystack-dir", default=str(Path(__file__).with_name("PaulGrahamEssays")))
+    parser.add_argument("--work-dir", type=Path, default=Path(__file__).resolve().parents[2] / "work_dirs" / "needle")
+    parser.add_argument("--needle", default="\n\nRemember, the best thing to do in San Francisco is eat a sandwich and sit in Dolores Park on a sunny day.\n\n")
+    parser.add_argument("--retrieval-question", default="what is the best thing to do in San Francisco?\n\nAnswer: The best thing to do in San Francisco is")
+    parser.add_argument("--simulation-length", "--simulation_length", dest="simulation_length", type=int, default=50)
+    parser.add_argument("--context-lengths-num-intervals", "--context_lengths_num_intervals", dest="context_lengths_num_intervals", type=int, default=40)
+    parser.add_argument("--document-depth-percent-intervals", "--document_depth_percent_intervals", dest="document_depth_percent_intervals", type=int, default=10)
+    parser.add_argument("--context-lengths-min", "--context_lengths_min", dest="context_lengths_min", type=int, default=1000)
+    parser.add_argument("--context-lengths-max", "--context_lengths_max", dest="context_lengths_max", type=int, default=1048000)
+    parser.add_argument("--document-depth-percent-min", "--document_depth_percent_min", dest="document_depth_percent_min", type=int, default=0)
+    parser.add_argument("--document-depth-percent-max", "--document_depth_percent_max", dest="document_depth_percent_max", type=int, default=100)
+    parser.add_argument("--prefilling-chunk-size", "--prefilling_chunk_size", dest="prefilling_chunk_size", type=int)
+    parser.add_argument("--max-new-tokens", type=int, default=51)
+    parser.add_argument("--method", choices=METHOD_CHOICES, default="none")
+    parser.add_argument("--max-capacity-prompt", "--max_capacity_prompt", dest="max_capacity_prompt", type=int, default=512)
+    parser.add_argument("--window-size", "--window_size", "--recent_size", dest="window_size", type=int, default=32)
+    parser.add_argument("--kernel-size", "--kernel_size", dest="kernel_size", type=int, default=7)
+    parser.add_argument("--pooling", choices=("avgpool", "maxpool"), default="maxpool")
+    parser.add_argument("--sink-size", "--sink_size", dest="sink_size", type=int, default=4)
+    parser.add_argument("--pyramid-beta", type=float, default=0.5)
+    parser.add_argument("--quest-page-size", type=int, default=16)
+    parser.add_argument("--nacl-proxy-size", type=int, default=32)
+    parser.add_argument("--nacl-proxy-mode", choices=("suffix", "prefix", "edges"), default="suffix")
+    parser.add_argument("--nacl-random-budget", type=int, default=0)
+    parser.add_argument("--scissorhands-decay", type=float, default=1.0)
+    parser.add_argument("--scissorhands-selection", choices=("topk", "prob"), default="topk")
+    parser.add_argument("--random-temperature", type=float, default=1.0)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--device-map")
+    parser.add_argument("--dtype", choices=("auto", "float32", "float16", "bfloat16"), default="auto")
+    parser.add_argument("--trust-remote-code", action="store_true")
+    parser.add_argument("--use-fast-tokenizer", action="store_true")
+    return parser
 
-    parser.add_argument("--prefilling_chunk_size", type=int, default=None)
 
-    parser.add_argument(
-        "--method",
-        type=str,
-        default=None,
-    )
-
-    args = parser.parse_args()
-
-    if args.model_path is not None:
-        assert args.model_name is None
-        model_name = args.model_path
-    else:
-        assert args.model_name is not None
-        model_name = args.model_name
-
-    ht = LLMNeedleHaystackTester(
+def main():
+    args = build_parser().parse_args()
+    if bool(args.model_path) == bool(args.model_name):
+        raise ValueError("Provide exactly one of --model-path or --model-name")
+    if args.method != "none" and args.prefilling_chunk_size is not None:
+        raise ValueError("CompressedDynamicCache requires one-shot prefill; omit --prefilling-chunk-size")
+    if args.max_new_tokens <= 0:
+        raise ValueError("max-new-tokens must be positive")
+    torch.manual_seed(args.seed)
+    _load_backbone_registration()
+    model_name = args.model_path or args.model_name
+    tester = LLMNeedleHaystackTester(
         args=args,
         model_name=model_name,
         model_name_suffix=args.model_name_suffix,
         tokenizer_path=args.tokenizer_path,
-        # model_provider=args.model_provider,
+        haystack_dir=args.haystack_dir,
+        needle=args.needle,
+        retrieval_question=args.retrieval_question,
         save_contexts=True,
         save_results=True,
         simulation_length=args.simulation_length,
@@ -543,5 +465,8 @@ if __name__ == "__main__":
         document_depth_percent_min=args.document_depth_percent_min,
         document_depth_percent_max=args.document_depth_percent_max,
     )
+    tester.start_test(args)
 
-    ht.start_test(args)
+
+if __name__ == "__main__":
+    main()

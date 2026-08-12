@@ -1,31 +1,33 @@
+"""OpenToMe model namespace with lazy imports.
 
-from opentome.models.blt import BltConfig, BltModel, BltForCausalLM
-from opentome.models.delta_net import DeltaNetConfig, DeltaNetForCausalLM, DeltaNetModel
-from opentome.models.gated_deltanet import GatedDeltaNetConfig, GatedDeltaNetForCausalLM, GatedDeltaNetModel
-from opentome.models.gla import GLAConfig, GLAForCausalLM, GLAModel
-from opentome.models.hnet import HNetConfig, HNetModel, HNetForCausalLM
-from opentome.models.hyena import HyenaConfig, HyenaDNAModel, HyenaDNAForCausalLM, HyenaDNAForSequenceClassification
-from opentome.models.transformer import TransformerConfig, TransformerForCausalLM, TransformerModel
-from opentome.models.mergenet_nlp import MergeNetConfig, MergeNetForCausalLM, MergeNetModel
-from opentome.models.gsa import GSAConfig, GSAForCausalLM, GSAModel
-# from opentome.models.qwen3_next import Qwen3NextConfig, Qwen3NextForCausalLM, Qwen3NextModel
+Import model families explicitly (for example ``opentome.models.llama``) to
+avoid loading every optional model dependency at package import time.
+"""
 
-# --- Classification Models ---
-from opentome.models.deit.deit import DeiTModel, deit_s, deit_s_extend
-from opentome.models.mergenet.model import HybridToMeModel
+from importlib import import_module
 
-__all__ = [
-    'BltConfig', 'BltModel', 'BltForCausalLM',
-    'DeltaNetConfig', 'DeltaNetForCausalLM', 'DeltaNetModel',
-    'GatedDeltaNetConfig', 'GatedDeltaNetForCausalLM', 'GatedDeltaNetModel',
-    'GLAConfig', 'GLAForCausalLM', 'GLAModel',
-    'HNetConfig', 'HNetModel', 'HNetForCausalLM',
-    'HyenaConfig', 'HyenaDNAModel', 'HyenaDNAForCausalLM', 'HyenaDNAForSequenceClassification',
-    'TransformerConfig', 'TransformerForCausalLM', 'TransformerModel',
-    'MergeNetConfig', 'MergeNetForCausalLM', 'MergeNetModel',
-    'GSAConfig', 'GSAForCausalLM', 'GSAModel',
-    # 'Qwen3NextConfig', 'Qwen3NextForCausalLM', 'Qwen3NextModel'
 
-    'DeiTModel', 'deit_s', 'deit_s_extend',
-    'HybridToMeModel',
-]
+_EXPORT_MODULES = {
+    "BltConfig": "opentome.models.blt", "BltModel": "opentome.models.blt", "BltForCausalLM": "opentome.models.blt",
+    "DeltaNetConfig": "opentome.models.delta_net", "DeltaNetForCausalLM": "opentome.models.delta_net", "DeltaNetModel": "opentome.models.delta_net",
+    "GatedDeltaNetConfig": "opentome.models.gated_deltanet", "GatedDeltaNetForCausalLM": "opentome.models.gated_deltanet", "GatedDeltaNetModel": "opentome.models.gated_deltanet",
+    "GLAConfig": "opentome.models.gla", "GLAForCausalLM": "opentome.models.gla", "GLAModel": "opentome.models.gla",
+    "HNetConfig": "opentome.models.hnet", "HNetModel": "opentome.models.hnet", "HNetForCausalLM": "opentome.models.hnet",
+    "HyenaConfig": "opentome.models.hyena", "HyenaDNAModel": "opentome.models.hyena", "HyenaDNAForCausalLM": "opentome.models.hyena", "HyenaDNAForSequenceClassification": "opentome.models.hyena",
+    "TransformerConfig": "opentome.models.transformer", "TransformerForCausalLM": "opentome.models.transformer", "TransformerModel": "opentome.models.transformer",
+    "MergeNetConfig": "opentome.models.mergenet_nlp", "MergeNetForCausalLM": "opentome.models.mergenet_nlp", "MergeNetModel": "opentome.models.mergenet_nlp",
+    "GSAConfig": "opentome.models.gsa", "GSAForCausalLM": "opentome.models.gsa", "GSAModel": "opentome.models.gsa",
+    "DeiTModel": "opentome.models.deit.deit", "deit_s": "opentome.models.deit.deit", "deit_s_extend": "opentome.models.deit.deit",
+    "HybridToMeModel": "opentome.models.mergenet.model",
+}
+
+__all__ = list(_EXPORT_MODULES)
+
+
+def __getattr__(name):
+    module_name = _EXPORT_MODULES.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value

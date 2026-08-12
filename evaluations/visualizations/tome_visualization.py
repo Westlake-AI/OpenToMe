@@ -9,6 +9,9 @@ import os
 import os.path as osp
 import glob
 import random
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 import timm
 import torch
 from PIL import Image
@@ -166,7 +169,7 @@ def parse_args():
     parser.add_argument('--save_vis', type=bool, default=True, help='whether to save the visualization of the merge tokens')
     parser.add_argument('--tracking_mode', type=str, default='matrix', choices=['map', 'matrix'])
     # Environment parameters
-    parser.add_argument('--work_dir', type=str, default='results/visualization', help='the dir to save logs and models')
+    parser.add_argument('--work_dir', type=str, default=str(REPO_ROOT / "work_dirs" / "visualizations"), help='the dir to save logs and models')
     parser.add_argument('--gpu_id', type=int, default=0, help='id of gpu to use ' '(only applicable to non-distributed testing)')
     parser.add_argument('--launcher', choices=['none', 'slurm', 'pytorch'], default='none', help='job launcher')
     parser.add_argument('--local_rank', help='set local_rank for torch.distributed.launch (torch<2.0.0)', type=int, default=0)

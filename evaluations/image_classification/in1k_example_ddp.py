@@ -10,6 +10,9 @@ import re
 import os
 import os.path as osp
 import time
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 import timm
 import torch
 import torch.distributed as dist
@@ -43,7 +46,7 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=100, help='batch size for evaluation')
     parser.add_argument('--num_workers', type=int, default=4, help='number of workers for data loading')
     # Environment parameters
-    parser.add_argument('--work_dir', type=str, default='results/in1k_classification', help='the dir to save logs and models')
+    parser.add_argument('--work_dir', type=str, default=str(REPO_ROOT / "work_dirs" / "image_classification"), help='the dir to save logs and models')
     parser.add_argument('--gpu_id', type=int, default=0, help='id of gpu to use ' '(only applicable to non-distributed testing)')
     parser.add_argument('--launcher', choices=['none', 'slurm', 'pytorch'], default='none', help='job launcher')
     parser.add_argument('--local_rank', help='set local_rank for torch.distributed.launch (torch<2.0.0)', type=int, default=0)

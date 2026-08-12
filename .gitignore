@@ -124,7 +124,6 @@ results
 *.pdf
 
 # develop experiment results
-evaluations/dna_hg38/outputs
 trainer/flame/exp
 trainer/classification/work_dirs
 exp/

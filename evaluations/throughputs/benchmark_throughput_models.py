@@ -2,6 +2,9 @@ import argparse
 import os
 import time
 import traceback
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 from typing import Optional, Tuple
 
 import pandas as pd
@@ -180,7 +183,7 @@ def get_args():
     parser.add_argument('--iters', type=int, default=50)
     parser.add_argument('--mode', type=str, default='fwd', choices=['fwd', 'fwd_bwd'])
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
-    parser.add_argument('--output_dir', type=str, default='/yuchang/yk/OpenToMe/evaluations/throughputs/results')
+    parser.add_argument('--output_dir', type=str, default=str(REPO_ROOT / "work_dirs" / "throughputs"))
     parser.add_argument('--output_file', type=str, default='throughput_models.csv')
     parser.add_argument('--suppress_oom', action='store_true', help='捕获 OOM 并记录 NaN/Inf，而不是抛出异常（默认不抑制）。')
     parser.add_argument('--continue_on_error', action='store_true', help='遇到异常时打印堆栈并继续下一个配置。')
