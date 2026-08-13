@@ -83,8 +83,6 @@ class CheckpointSaver(_CheckpointSaver):
 USE_OLD_MERGENET = os.getenv("OPENTOME_MERGENET_IMPL", "new").lower() in {"old", "model_old", "legacy"}
 USE_TOME_MERGENET = os.getenv("OPENTOME_MERGENET_IMPL", "new").lower() in {"tome", "model_tome"}
 
-import opentome.models.deit
-from opentome.models.deit.deit import deit_s, deit_s_extend  # Import to register models
 if USE_OLD_MERGENET:
     import opentome.models.mergenet.model_old  # register old HybridToMe models
 elif USE_TOME_MERGENET:

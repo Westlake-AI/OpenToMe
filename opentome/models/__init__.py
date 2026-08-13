@@ -17,7 +17,6 @@ _EXPORT_MODULES = {
     "TransformerConfig": "opentome.models.transformer", "TransformerForCausalLM": "opentome.models.transformer", "TransformerModel": "opentome.models.transformer",
     "MergeNetConfig": "opentome.models.mergenet_nlp", "MergeNetForCausalLM": "opentome.models.mergenet_nlp", "MergeNetModel": "opentome.models.mergenet_nlp",
     "GSAConfig": "opentome.models.gsa", "GSAForCausalLM": "opentome.models.gsa", "GSAModel": "opentome.models.gsa",
-    "DeiTModel": "opentome.models.deit.deit", "deit_s": "opentome.models.deit.deit", "deit_s_extend": "opentome.models.deit.deit",
     "HybridToMeModel": "opentome.models.mergenet.model",
 }
 
